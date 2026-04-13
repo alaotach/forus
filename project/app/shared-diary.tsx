@@ -38,11 +38,11 @@ import {
   serverTimestamp,
   where
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
-import { db, storage } from '@/services/firebase';
+import { db } from '@/services/firebase';
 import * as ImagePicker from 'expo-image-picker';
 import { useAudioRecorder, useAudioPlayer } from 'expo-audio';
 import VoiceRecorder from '@/components/VoiceRecorder';
+import { uploadImageToCloudinary, uploadAudioToCloudinary } from '@/services/cloudinary';
 
 const { width, height } = Dimensions.get('window');
 
@@ -77,7 +77,7 @@ export default function SharedDiaryScreen() {
     }
 
     if (!isConnected || !coupleData) {
-      router.replace('/pairing');
+      router.replace('/(auth)/auth');
       return;
     }
 
@@ -186,19 +186,11 @@ export default function SharedDiaryScreen() {
     if (!coupleData) return;
 
     try {
-      const response = await fetch(uri);
-      const blob = await response.blob();
-      
-      const imageName = `images/${coupleData.coupleCode}/${Date.now()}.jpg`;
-      const imageRef = ref(storage, imageName);
-      
-      await uploadBytes(imageRef, blob);
-      const downloadURL = await getDownloadURL(imageRef);
+      const downloadURL = await uploadImageToCloudinary(uri);
 
       const entryData = {
         type: 'image',
         mediaUrl: downloadURL,
-        mediaPath: imageName,
         author: coupleData.nickname,
         timestamp: serverTimestamp(),
         coupleCode: coupleData.coupleCode,
@@ -216,14 +208,7 @@ export default function SharedDiaryScreen() {
     if (!coupleData) return;
 
     try {
-      const response = await fetch(audioUri);
-      const blob = await response.blob();
-      
-      const audioName = `audio/${coupleData.coupleCode}/${Date.now()}.m4a`;
-      const audioRef = ref(storage, audioName);
-      
-      await uploadBytes(audioRef, blob);
-      const downloadURL = await getDownloadURL(audioRef);
+      const downloadURL = await uploadAudioToCloudinary(audioUri);
 
       const entryData = {
         type: 'voice',

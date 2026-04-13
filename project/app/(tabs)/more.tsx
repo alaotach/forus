@@ -7,18 +7,38 @@ import {
   StyleSheet,
   Alert,
   Animated,
+  Modal,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Sparkles, Smile, MessageSquare, Calendar, Bot, Settings, LogOut, Target, Heart, Circle as HelpCircle } from 'lucide-react-native';
+import { Sparkles, Smile, MessageSquare, Calendar, Bot, Settings, LogOut, Target, Heart, Circle as HelpCircle, X, Crown } from 'lucide-react-native';
 import { useCouple } from '@/hooks/useCouple';
 import { useRouter } from 'expo-router';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { auth, db } from '@/services/firebase';
+import { signOut } from 'firebase/auth';
+import { AdBanner } from '@/components/AdBanner';
+import { getSubscription, shouldShowAds, SubscriptionData } from '@/services/subscriptions';
 
 export default function MoreScreen() {
   const { coupleData, isConnected, clearCoupleData } = useCouple();
   const router = useRouter();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
+  const [showMoodModal, setShowMoodModal] = useState(false);
+  const [selectedMood, setSelectedMood] = useState<string | null>(null);
+  const [isSubmittingMood, setIsSubmittingMood] = useState(false);
+  const [subscription, setSubscription] = useState<SubscriptionData | null>(null);
+  const [showAdBanner, setShowAdBanner] = useState(true);
+
+  const moods = [
+    { emoji: '😊', label: 'Happy', color: '#fdcb6e' },
+    { emoji: '💕', label: 'Romantic', color: '#fd79a8' },
+    { emoji: '🙏', label: 'Grateful', color: '#00b894' },
+    { emoji: '😔', label: 'Sad', color: '#74b9ff' },
+    { emoji: '😤', label: 'Angry', color: '#e17055' },
+    { emoji: '🥺', label: 'Nostalgic', color: '#a29bfe' },
+  ];
 
   useEffect(() => {
     Animated.parallel([
@@ -33,7 +53,12 @@ export default function MoreScreen() {
         useNativeDriver: true,
       }),
     ]).start();
-  }, []);
+
+    // Load subscription
+    if (coupleData) {
+      loadSubscription();
+    }
+  }, [coupleData]);
 
   const handleLogout = () => {
     Alert.alert(
@@ -46,18 +71,57 @@ export default function MoreScreen() {
           style: 'destructive',
           onPress: async () => {
             await clearCoupleData();
-            router.replace('/pairing');
+            await signOut(auth);
+            router.replace('/(auth)/auth');
           }
         }
       ]
     );
   };
 
+  const loadSubscription = async () => {
+    if (!coupleData) return;
+    
+    try {
+      const sub = await getSubscription(coupleData.coupleCode);
+      setSubscription(sub);
+      setShowAdBanner(shouldShowAds(sub));
+    } catch (error) {
+      console.error('Error loading subscription:', error);
+    }
+  };
+
   const handleFeature = (feature: string, route?: string) => {
-    if (route) {
+    if (feature === 'Mood Check-In') {
+      setShowMoodModal(true);
+      setSelectedMood(null);
+    } else if (route) {
       router.push(route as any);
     } else {
       Alert.alert('Coming Soon', `${feature} will be implemented soon! 💕`);
+    }
+  };
+
+  const submitMood = async () => {
+    if (!selectedMood || !coupleData) return;
+
+    try {
+      setIsSubmittingMood(true);
+      const moodoChecksRef = collection(db, 'couples', coupleData.coupleCode, 'moodChecks');
+      await addDoc(moodoChecksRef, {
+        mood: selectedMood,
+        user: coupleData.nickname,
+        timestamp: serverTimestamp(),
+      });
+
+      setShowMoodModal(false);
+      setSelectedMood(null);
+      Alert.alert('Mood recorded', `${selectedMood} mood saved! 💭`);
+    } catch (error) {
+      console.error('Error saving mood:', error);
+      Alert.alert('Error', 'Failed to save mood');
+    } finally {
+      setIsSubmittingMood(false);
     }
   };
 
@@ -98,7 +162,8 @@ export default function MoreScreen() {
       subtitle: 'Track important dates & countdowns',
       icon: Calendar,
       emoji: '📅',
-      colors: ['#fdcb6e', '#e17055']
+      colors: ['#fdcb6e', '#e17055'],
+      route: '/milestones'
     },
     {
       id: 'echo',
@@ -159,6 +224,11 @@ export default function MoreScreen() {
           </Animated.View>
 
           <ScrollView style={styles.featuresList} showsVerticalScrollIndicator={false}>
+            <AdBanner 
+              visible={showAdBanner} 
+              onClose={() => setShowAdBanner(false)}
+            />
+
             {features.map((feature, index) => (
               <Animated.View 
                 key={feature.id}
@@ -212,7 +282,7 @@ export default function MoreScreen() {
               
               <TouchableOpacity 
                 style={styles.settingsItem}
-                onPress={() => handleFeature('Settings')}
+                onPress={() => router.push('/settings')}
               >
                 <Settings size={20} color="#666" />
                 <Text style={styles.settingsText}>App Settings</Text>
@@ -220,10 +290,18 @@ export default function MoreScreen() {
 
               <TouchableOpacity 
                 style={styles.settingsItem}
-                onPress={() => handleFeature('Help & Support')}
+                onPress={() => router.push('/support')}
               >
                 <HelpCircle size={20} color="#666" />
                 <Text style={styles.settingsText}>Help & Support</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={styles.settingsItem}
+                onPress={() => router.push('/mood-history')}
+              >
+                <Smile size={20} color="#666" />
+                <Text style={styles.settingsText}>Mood History</Text>
               </TouchableOpacity>
 
               <TouchableOpacity 
@@ -250,6 +328,64 @@ export default function MoreScreen() {
             </Animated.View>
           </ScrollView>
         </View>
+
+        {/* Mood Modal */}
+        <Modal 
+          visible={showMoodModal}
+          animationType="fade"
+          transparent={true}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.moodModalContent}>
+              <View style={styles.moodModalHeader}>
+                <Text style={styles.moodModalTitle}>How are you feeling today? 💭</Text>
+                <TouchableOpacity 
+                  onPress={() => setShowMoodModal(false)}
+                  style={styles.moodCloseButton}
+                >
+                  <X size={24} color="#333" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.moodsGrid}>
+                {moods.map((mood) => (
+                  <TouchableOpacity
+                    key={mood.label}
+                    style={[
+                      styles.moodOption,
+                      selectedMood === mood.label && styles.moodOptionSelected,
+                    ]}
+                    onPress={() => setSelectedMood(mood.label)}
+                  >
+                    <Text style={styles.moodEmoji}>{mood.emoji}</Text>
+                    <Text style={styles.moodLabel}>{mood.label}</Text>
+                    {selectedMood === mood.label && (
+                      <View style={[styles.moodCheckmark, { backgroundColor: mood.color }]} />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <TouchableOpacity
+                style={[
+                  styles.moodSubmitButton,
+                  !selectedMood && styles.moodSubmitButtonDisabled,
+                ]}
+                onPress={submitMood}
+                disabled={!selectedMood || isSubmittingMood}
+              >
+                <LinearGradient
+                  colors={['#a29bfe', '#6c5ce7']}
+                  style={styles.moodSubmitGradient}
+                >
+                  <Text style={styles.moodSubmitText}>
+                    {isSubmittingMood ? 'Saving...' : 'Share My Mood'}
+                  </Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </LinearGradient>
   );
@@ -313,6 +449,7 @@ const styles = StyleSheet.create({
   },
   featuresList: {
     flex: 1,
+    paddingBottom: 100,
   },
   featureCard: {
     borderRadius: 20,
@@ -403,5 +540,87 @@ const styles = StyleSheet.create({
     color: '#666',
     textAlign: 'center',
     lineHeight: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
+  },
+  moodModalContent: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 24,
+    paddingHorizontal: 20,
+    paddingBottom: 32,
+  },
+  moodModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  moodModalTitle: {
+    fontSize: 18,
+    fontFamily: 'Playfair-Bold',
+    color: '#333',
+    flex: 1,
+  },
+  moodCloseButton: {
+    padding: 4,
+  },
+  moodsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+  },
+  moodOption: {
+    width: '32%',
+    alignItems: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: '#f8f9fa',
+    marginBottom: 12,
+  },
+  moodOptionSelected: {
+    backgroundColor: '#f0f0f0',
+    borderWidth: 2,
+    borderColor: '#a29bfe',
+  },
+  moodEmoji: {
+    fontSize: 32,
+    marginBottom: 8,
+  },
+  moodLabel: {
+    fontSize: 12,
+    fontFamily: 'Inter-SemiBold',
+    color: '#333',
+  },
+  moodCheckmark: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+  },
+  moodSubmitButton: {
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  moodSubmitButtonDisabled: {
+    opacity: 0.5,
+  },
+  moodSubmitGradient: {
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  moodSubmitText: {
+    fontSize: 16,
+    fontFamily: 'Inter-Bold',
+    color: '#ffffff',
   },
 });

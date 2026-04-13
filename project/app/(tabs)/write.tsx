@@ -36,12 +36,12 @@ export default function WriteScreen() {
     }
 
     if (!isConnected) {
-      router.replace('/pairing');
+      router.replace('/(auth)/auth');
       return;
     }
 
-    loadRecentParagraphs();
-    checkTodaysParagraph();
+    const unsubRecent = loadRecentParagraphs();
+    const unsubToday = checkTodaysParagraph();
 
     // Animate in
     Animated.parallel([
@@ -56,6 +56,17 @@ export default function WriteScreen() {
         useNativeDriver: true,
       }),
     ]).start();
+
+    return () => {
+      if (unsubRecent) unsubRecent();
+      if (unsubToday && typeof unsubToday.then === 'function') {
+        unsubToday.then((unsub: (() => void) | undefined) => {
+          if (unsub) unsub();
+        });
+      } else if (typeof unsubToday === 'function') {
+        unsubToday();
+      }
+    };
   }, [isConnected, isLoading]);
 
   const loadRecentParagraphs = () => {
@@ -373,6 +384,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 20,
+    paddingBottom: 100,
   },
   todaySection: {
     marginBottom: 24,

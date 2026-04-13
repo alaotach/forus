@@ -1,9 +1,30 @@
 import { Tabs } from 'expo-router';
-import { Heart, MessageCircle, Archive, Target, Sparkles, PenTool } from 'lucide-react-native';
+import { Heart, MessageCircle, Archive, Target, Sparkles, PenTool, Bell } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { View } from 'react-native';
+import { View, Text } from 'react-native';
+import { useState, useEffect } from 'react';
+import { useCouple } from '@/hooks/useCouple';
 
 export default function TabLayout() {
+  const { coupleData } = useCouple();
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    if (!coupleData) return;
+
+    try {
+      const { subscribeToNotifications } = require('@/services/notifications');
+      
+      const unsubscribe = subscribeToNotifications(coupleData.coupleCode, (notificationsList: any[]) => {
+        const unreadNotifications = notificationsList.filter((n: any) => !n.read);
+        setUnreadCount(unreadNotifications.length);
+      });
+
+      return unsubscribe;
+    } catch (error) {
+      console.error('Error setting up notification badge listener:', error);
+    }
+  }, [coupleData]);
   return (
     <Tabs
       screenOptions={{
@@ -95,8 +116,30 @@ export default function TabLayout() {
         options={{
           title: 'More',
           tabBarIcon: ({ size, color }) => (
-            <Sparkles size={size} color={color} />
+            <View>
+              <Sparkles size={size} color={color} />
+              {unreadCount > 0 && (
+                <View
+                  style={{
+                    position: 'absolute',
+                    top: -4,
+                    right: -6,
+                    backgroundColor: '#ff6b9d',
+                    borderRadius: 10,
+                    minWidth: 20,
+                    height: 20,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                  }}
+                >
+                  <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold' }}>
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </Text>
+                </View>
+              )}
+            </View>
           ),
+          tabBarBadge: unreadCount > 0 ? unreadCount : undefined,
         }}
       />
     </Tabs>

@@ -47,8 +47,8 @@ export default function GoalsScreen() {
 
     // Check connection and redirect if needed
     if (!isConnected || !coupleData) {
-      console.log('Goals: Not connected, redirecting to pairing');
-      router.replace('/pairing');
+      console.log('Goals: Not connected, redirecting to auth');
+      router.replace('/(auth)/auth');
       return;
     }
 
@@ -86,14 +86,20 @@ export default function GoalsScreen() {
 
     try {
       const goalsRef = collection(db, 'goals', coupleData.coupleCode, 'items');
-      await addDoc(goalsRef, {
+      const goalData: any = {
         title: newGoalTitle.trim(),
-        description: newGoalDescription.trim() || undefined,
         completed: false,
         priority: selectedPriority,
         createdBy: coupleData.nickname,
         createdAt: serverTimestamp(),
-      });
+      };
+
+      // Only add description if it has content
+      if (newGoalDescription.trim()) {
+        goalData.description = newGoalDescription.trim();
+      }
+
+      await addDoc(goalsRef, goalData);
 
       setNewGoalTitle('');
       setNewGoalDescription('');
@@ -115,11 +121,13 @@ export default function GoalsScreen() {
       };
 
       if (!completed) {
+        // Mark as completed
         updateData.completedBy = coupleData.nickname;
         updateData.completedAt = serverTimestamp();
       } else {
-        updateData.completedBy = null;
-        updateData.completedAt = null;
+        // Mark as incomplete - don't set null, just delete the fields
+        // For Firestore, we need to explicitly not include these fields
+        // So we'll just update with completed: false
       }
 
       await updateDoc(goalRef, updateData);
@@ -545,6 +553,7 @@ const styles = StyleSheet.create({
   },
   goalsList: {
     flex: 1,
+    paddingBottom: 100,
   },
   addGoalPrompt: {
     flexDirection: 'row',

@@ -14,9 +14,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Flame, PenTool, MessageCircle, Users, Calendar, Heart, Sparkles } from 'lucide-react-native';
 import { useCouple } from '@/hooks/useCouple';
 import { useRouter } from 'expo-router';
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { usePushNotifications } from '@/hooks/usePushNotifications';
+import { doc, getDoc, getDocs, setDoc, updateDoc, serverTimestamp, collection, query, where } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { getTodaysPrompt } from '@/services/prompts';
+import { checkAndDeleteExpiredFreeItems, checkAndDowngradeExpiredSubscription } from '@/services/subscriptions';
 
 const { width } = Dimensions.get('window');
 
@@ -36,6 +38,9 @@ export default function HomeScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
   
+  // Initialize push notifications
+  usePushNotifications();
+  
   const [streakData, setStreakData] = useState<StreakData>({
     appStreak: 0,
     paragraphStreak: 0,
@@ -47,6 +52,7 @@ export default function HomeScreen() {
   const [todaysParagraph, setTodaysParagraph] = useState<any>(null);
   const [dailyPrompt, setDailyPrompt] = useState('');
   const [isLoadingPrompt, setIsLoadingPrompt] = useState(false);
+  const [notifications, setNotifications] = useState<any[]>([]);
 
   useEffect(() => {
     mounted.current = true;
@@ -60,13 +66,28 @@ export default function HomeScreen() {
     console.log('Home screen - isConnected:', isConnected, 'coupleData:', coupleData);
     
     if (!isConnected || !coupleData) {
-      console.log('Not connected, redirecting to pairing');
-      router.replace('/pairing');
+      console.log('Not connected, redirecting to auth');
+      router.replace('/(auth)/auth');
       return;
     }
 
     updateAppStreak();
     loadTodaysParagraph();
+    
+    // Cleanup expired vault items for free plan users
+    if (coupleData) {
+      checkAndDeleteExpiredFreeItems(coupleData.coupleCode).catch(error => 
+        console.error('Error cleaning up expired items:', error)
+      );
+      
+      // Check if subscription expired and downgrade if needed
+      checkAndDowngradeExpiredSubscription(coupleData.coupleCode).catch(error =>
+        console.error('Error checking subscription expiry:', error)
+      );
+      
+      // Setup real-time notification listener
+      setupNotificationListener(coupleData.coupleCode);
+    }
 
     // Animate in
     Animated.parallel([
@@ -95,21 +116,39 @@ export default function HomeScreen() {
       const streakRef = doc(db, 'streaks', coupleData.coupleCode);
       const streakDoc = await getDoc(streakRef);
 
+      // Also check couple data to verify both users
+      const coupleRef = doc(db, 'couples', coupleData.coupleCode);
+      const coupleDoc = await getDoc(coupleRef);
+
       if (!mounted.current) return;
+
+      // Track today's login for this user
+      const userLogins = (coupleDoc.data()?.logins || {}) as { [key: string]: string };
+      userLogins[coupleData.nickname] = today;
+
+      // Check if both users logged in today. Since a couple has exactly 2 members,
+      // we check if we have 2 distinct nicknames logged in today.
+      const allUsersLoggedInToday = Object.keys(userLogins).length === 2 && 
+        Object.values(userLogins).every(loginDate => loginDate === today);
 
       if (streakDoc.exists()) {
         const data = streakDoc.data() as StreakData;
         const lastOpen = data.lastAppOpen;
         
         let newAppStreak = data.appStreak;
+        let shouldIncreaseStreak = false;
+
         if (lastOpen !== today) {
           const yesterday = new Date();
           yesterday.setDate(yesterday.getDate() - 1);
           
-          if (lastOpen === yesterday.toDateString()) {
+          // Only increase streak if both users logged in yesterday and both logged in today
+          if (lastOpen === yesterday.toDateString() && allUsersLoggedInToday) {
             newAppStreak += 1;
+            shouldIncreaseStreak = true;
           } else if (lastOpen !== today) {
-            newAppStreak = 1;
+            // Reset streak if someone missed a day
+            newAppStreak = allUsersLoggedInToday ? 1 : 0;
           }
 
           const longestAppStreak = Math.max(data.longestAppStreak || 0, newAppStreak);
@@ -120,8 +159,17 @@ export default function HomeScreen() {
             longestAppStreak,
           });
 
+          // Also update couple logins (create document if it doesn't exist)
+          await setDoc(coupleRef, { logins: userLogins }, { merge: true });
+
           if (mounted.current) {
             setStreakData({ ...data, appStreak: newAppStreak, lastAppOpen: today, longestAppStreak });
+          }
+
+          // Send streak notification if milestone
+          if (shouldIncreaseStreak && newAppStreak > 0 && newAppStreak % 7 === 0) {
+            const { notifyStreakMilestone } = await import('@/services/notifications');
+            notifyStreakMilestone(coupleData.coupleCode, newAppStreak, 'app');
           }
         } else {
           if (mounted.current) {
@@ -129,15 +177,18 @@ export default function HomeScreen() {
           }
         }
       } else {
+        // Initial setup - only set streak to 1 if both users are here
+        const initialStreak = allUsersLoggedInToday ? 1 : 0;
         const initialData = {
-          appStreak: 1,
+          appStreak: initialStreak,
           paragraphStreak: 0,
           lastAppOpen: today,
           lastParagraphDate: '',
-          longestAppStreak: 1,
+          longestAppStreak: initialStreak,
           longestParagraphStreak: 0,
         };
         await setDoc(streakRef, initialData);
+        await setDoc(coupleRef, { logins: userLogins }, { merge: true });
         if (mounted.current) {
           setStreakData(initialData);
         }
@@ -152,13 +203,21 @@ export default function HomeScreen() {
 
     try {
       const today = new Date().toISOString().split('T')[0];
-      const paragraphRef = doc(db, 'dailyParagraphs', coupleData.coupleCode, today, coupleData.nickname);
-      const paragraphDoc = await getDoc(paragraphRef);
+      
+      const paragraphsRef = collection(db, 'dailyParagraphs');
+      const q = query(
+        paragraphsRef,
+        where('coupleCode', '==', coupleData.coupleCode),
+        where('nickname', '==', coupleData.nickname),
+        where('date', '==', today)
+      );
+      
+      const snapshot = await getDocs(q);
 
       if (!mounted.current) return;
 
-      if (paragraphDoc.exists()) {
-        setTodaysParagraph(paragraphDoc.data());
+      if (!snapshot.empty) {
+        setTodaysParagraph(snapshot.docs[0].data());
       } else {
         if (mounted.current) {
           setIsLoadingPrompt(true);
@@ -189,6 +248,29 @@ export default function HomeScreen() {
       if (mounted.current) {
         setIsLoadingPrompt(false);
       }
+    }
+  };
+
+  const setupNotificationListener = (coupleCode: string) => {
+    try {
+      const { subscribeToNotifications } = require('@/services/notifications');
+      
+      const unsubscribe = subscribeToNotifications(coupleCode, (notification: any) => {
+        if (mounted.current && !notification.read) {
+          setNotifications(prev => {
+            // Check if we already have it
+            if (prev.some(n => n.id === notification.id)) return prev;
+            return [notification, ...prev];
+          });
+          
+          console.log('New notification:', notification);
+        }
+      });
+
+      // Cleanup listener on unmount
+      return unsubscribe;
+    } catch (error) {
+      console.error('Error setting up notification listener:', error);
     }
   };
 
@@ -413,6 +495,7 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
     padding: 20,
+    paddingBottom: 100,
   },
   header: {
     marginBottom: 24,

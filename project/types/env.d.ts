@@ -8,6 +8,8 @@ declare global {
       EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: string;
       EXPO_PUBLIC_FIREBASE_APP_ID: string;
       EXPO_PUBLIC_OPENAI_API_KEY: string;
+      EXPO_PUBLIC_BACKEND_URL?: string;
+      EXPO_PUBLIC_UPLOAD_API_TOKEN?: string;
     }
   }
 }

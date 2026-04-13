@@ -16,7 +16,7 @@ import { ArrowLeft, Send, Bot, Heart } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useCouple } from '@/hooks/useCouple';
 import { generateEchoResponse, CoupleContext } from '@/services/openai';
-import { collection, query, orderBy, limit, getDocs, doc, getDoc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, getDocs, doc, getDoc, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 
 interface EchoMessage {
@@ -25,6 +25,37 @@ interface EchoMessage {
   isEcho: boolean;
   timestamp: Date;
 }
+
+const TypingIndicator = () => {
+  const dot1 = useRef(new Animated.Value(0.3)).current;
+  const dot2 = useRef(new Animated.Value(0.3)).current;
+  const dot3 = useRef(new Animated.Value(0.3)).current;
+
+  useEffect(() => {
+    const animateDot = (dot: Animated.Value) => {
+      return Animated.sequence([
+        Animated.timing(dot, { toValue: 1, duration: 300, useNativeDriver: true }),
+        Animated.timing(dot, { toValue: 0.3, duration: 300, useNativeDriver: true })
+      ]);
+    };
+
+    Animated.loop(
+      Animated.stagger(150, [
+        animateDot(dot1),
+        animateDot(dot2),
+        animateDot(dot3),
+      ])
+    ).start();
+  }, []);
+
+  return (
+    <View style={{ flexDirection: 'row', marginLeft: 8, alignItems: 'center' }}>
+      <Animated.View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#74b9ff', marginHorizontal: 2, opacity: dot1 }} />
+      <Animated.View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#74b9ff', marginHorizontal: 2, opacity: dot2 }} />
+      <Animated.View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#74b9ff', marginHorizontal: 2, opacity: dot3 }} />
+    </View>
+  );
+};
 
 export default function EchoScreen() {
   const router = useRouter();
@@ -41,14 +72,7 @@ export default function EchoScreen() {
 
   useEffect(() => {
     loadCoupleContext();
-    // Welcome message from Echo
-    const welcomeMessage: EchoMessage = {
-      id: 'welcome',
-      content: `Hello ${coupleData?.nickname}! I'm Echo, your AI memory keeper. I've been learning about your relationship through your chats, writings, and shared moments. Ask me about your memories, or just chat about how you're feeling! 💕`,
-      isEcho: true,
-      timestamp: new Date(),
-    };
-    setMessages([welcomeMessage]);
+    loadEchoMessages();
 
     // Animate in
     Animated.timing(fadeAnim, {
@@ -111,8 +135,55 @@ export default function EchoScreen() {
     }
   };
 
+  const loadEchoMessages = async () => {
+    if (!coupleData) return;
+
+    try {
+      const echoChatsRef = collection(db, 'couples', coupleData.coupleCode, 'echoChats');
+      const echoChatsQuery = query(echoChatsRef, orderBy('timestamp', 'asc'));
+      const echoChatsSnapshot = await getDocs(echoChatsQuery);
+      
+      const loadedMessages: EchoMessage[] = echoChatsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        content: doc.data().content,
+        isEcho: doc.data().isEcho,
+        timestamp: doc.data().timestamp?.toDate() || new Date(),
+      }));
+
+      if (loadedMessages.length === 0) {
+        // Show welcome message if no previous chats
+        const welcomeMessage: EchoMessage = {
+          id: 'welcome',
+          content: `Hello ${coupleData?.nickname}! I'm Echo, your AI memory keeper. I've been learning about your relationship through your chats, writings, and shared moments. Ask me about your memories, or just chat about how you're feeling! 💕`,
+          isEcho: true,
+          timestamp: new Date(),
+        };
+        setMessages([welcomeMessage]);
+      } else {
+        setMessages(loadedMessages);
+      }
+
+      // Restore conversation history from loaded messages
+      const history = loadedMessages.map(msg => ({
+        role: (msg.isEcho ? 'assistant' : 'user') as 'user' | 'assistant',
+        content: msg.content,
+      }));
+      setConversationHistory(history);
+    } catch (error) {
+      console.error('Error loading Echo messages:', error);
+      // Show welcome message as fallback
+      const welcomeMessage: EchoMessage = {
+        id: 'welcome',
+        content: `Hello ${coupleData?.nickname}! I'm Echo, your AI memory keeper. I've been learning about your relationship through your chats, writings, and shared moments. Ask me about your memories, or just chat about how you're feeling! 💕`,
+        isEcho: true,
+        timestamp: new Date(),
+      };
+      setMessages([welcomeMessage]);
+    }
+  };
+
   const sendMessage = async () => {
-    if (!inputText.trim()) return;
+    if (!inputText.trim() || !coupleData) return;
 
     const userMessage: EchoMessage = {
       id: Date.now().toString(),
@@ -130,6 +201,14 @@ export default function EchoScreen() {
     const newHistory = [...conversationHistory, { role: 'user' as const, content: currentInput }];
 
     try {
+      // Save user message to Firestore
+      const echoChatsRef = collection(db, 'couples', coupleData.coupleCode, 'echoChats');
+      await addDoc(echoChatsRef, {
+        content: currentInput,
+        isEcho: false,
+        timestamp: serverTimestamp(),
+      });
+
       const echoResponseContent = await generateEchoResponse(currentInput, coupleContext, newHistory);
       
       const echoResponse: EchoMessage = {
@@ -141,6 +220,13 @@ export default function EchoScreen() {
 
       setMessages(prev => [...prev, echoResponse]);
       setConversationHistory([...newHistory, { role: 'assistant', content: echoResponseContent }]);
+      
+      // Save Echo response to Firestore
+      await addDoc(echoChatsRef, {
+        content: echoResponseContent,
+        isEcho: true,
+        timestamp: serverTimestamp(),
+      });
       
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
@@ -261,12 +347,8 @@ export default function EchoScreen() {
               >
                 <View style={styles.typingBubble}>
                   <Bot size={16} color="#74b9ff" />
-                  <Text style={styles.typingText}>Echo is thinking...</Text>
-                  <View style={styles.typingDots}>
-                    <View style={[styles.dot, styles.dot1]} />
-                    <View style={[styles.dot, styles.dot2]} />
-                    <View style={[styles.dot, styles.dot3]} />
-                  </View>
+                  <Text style={styles.typingText}>Echo is thinking</Text>
+                  <TypingIndicator />
                 </View>
               </Animated.View>
             )}

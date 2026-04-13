@@ -1,4 +1,6 @@
 import { generateDailyPrompt, generateDeepQuestion, generateConflictPrompt, CoupleContext } from './openai';
+import { db } from './firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 // Legacy fallback prompts (kept for offline scenarios)
 export const dailyPrompts = [
@@ -73,23 +75,106 @@ export const conflictPrompts = [
 // Enhanced functions that use OpenAI when available, fallback to static prompts
 export async function getTodaysPrompt(context?: CoupleContext): Promise<string> {
   try {
-    return await generateDailyPrompt(context);
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+    const dayOfYear = Math.floor((new Date().getTime() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
+    
+    // Create a unique key per couple per day (not per user)
+    const promptKey = context?.coupleCode 
+      ? `${today}_${context.coupleCode}` 
+      : today;
+    
+    // Check if we have a prompt stored for this couple today
+    const promptRef = doc(db, 'dailyPrompts', promptKey);
+    const promptDoc = await getDoc(promptRef);
+    
+    if (promptDoc.exists()) {
+      // Return cached prompt for this couple today
+      return promptDoc.data().prompt;
+    }
+    
+    // Generate new prompt for this couple
+    let prompt: string;
+    try {
+      prompt = await generateDailyPrompt(context);
+    } catch (error) {
+      console.error('OpenAI error, using static prompt:', error);
+      // Use different fallback for each couple by adding their coupleCode to the hash
+      const coupleHash = context?.coupleCode 
+        ? context.coupleCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) 
+        : 0;
+      prompt = dailyPrompts[(dayOfYear + coupleHash) % dailyPrompts.length];
+    }
+    
+    // Store the prompt for this couple today
+    await setDoc(promptRef, {
+      prompt,
+      createdAt: new Date(),
+      date: today,
+      coupleCode: context?.coupleCode || 'anonymous',
+    });
+    
+    return prompt;
   } catch (error) {
-    console.error('Falling back to static prompt:', error);
+    console.error('Error in getTodaysPrompt:', error);
+    // Final fallback
     const today = new Date();
     const dayOfYear = Math.floor((today.getTime() - new Date(today.getFullYear(), 0, 0).getTime()) / 86400000);
-    return dailyPrompts[dayOfYear % dailyPrompts.length];
+    const coupleHash = context?.coupleCode 
+      ? context.coupleCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) 
+      : 0;
+    return dailyPrompts[(dayOfYear + coupleHash) % dailyPrompts.length];
   }
 }
 
 export async function getTodaysDeepQuestion(context?: CoupleContext): Promise<string> {
   try {
-    return await generateDeepQuestion(context);
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+    const dayOfYear = Math.floor((new Date().getTime() - new Date(new Date().getFullYear(), 0, 0).getTime()) / 86400000);
+    
+    // Create a unique key per couple per day (not per user)
+    const questionKey = context?.coupleCode 
+      ? `${today}_${context.coupleCode}` 
+      : today;
+    
+    // Check if we have a deep question stored for this couple today
+    const questionRef = doc(db, 'dailyDeepQuestions', questionKey);
+    const questionDoc = await getDoc(questionRef);
+    
+    if (questionDoc.exists()) {
+      // Return cached question for this couple today
+      return questionDoc.data().question;
+    }
+    
+    // Generate new question for this couple
+    let question: string;
+    try {
+      question = await generateDeepQuestion(context);
+    } catch (error) {
+      console.error('OpenAI error, using static question:', error);
+      // Use different fallback for each couple
+      const coupleHash = context?.coupleCode 
+        ? context.coupleCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) 
+        : 0;
+      question = deepQuestions[(dayOfYear + coupleHash) % deepQuestions.length];
+    }
+    
+    // Store the question for this couple today
+    await setDoc(questionRef, {
+      question,
+      createdAt: new Date(),
+      date: today,
+      coupleCode: context?.coupleCode || 'anonymous',
+    });
+    
+    return question;
   } catch (error) {
-    console.error('Falling back to static deep question:', error);
+    console.error('Error in getTodaysDeepQuestion:', error);
     const today = new Date();
     const dayOfYear = Math.floor((today.getTime() - new Date(today.getFullYear(), 0, 0).getTime()) / 86400000);
-    return deepQuestions[dayOfYear % deepQuestions.length];
+    const coupleHash = context?.coupleCode 
+      ? context.coupleCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) 
+      : 0;
+    return deepQuestions[(dayOfYear + coupleHash) % deepQuestions.length];
   }
 }
 

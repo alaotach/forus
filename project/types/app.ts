@@ -48,6 +48,7 @@ export interface VaultItem {
   tags?: string[];
   mood?: string;
   favorite?: boolean;
+  duration?: number;
 }
 
 export interface Goal {

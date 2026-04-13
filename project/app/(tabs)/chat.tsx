@@ -29,12 +29,13 @@ import {
   updateDoc,
   arrayUnion
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '@/services/firebase';
+import { db } from '@/services/firebase';
 import { ChatMessage } from '@/types/app';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import { uploadPhotoToCloudinary, uploadAudioToCloudinary } from '@/services/cloudinary';
 import * as ImagePicker from 'expo-image-picker';
 import { useAudioPlayer, useAudioRecorder, AudioSource } from 'expo-audio';
+import * as Audio from 'expo-audio';
 
 export default function ChatScreen() {
   const { coupleData, isConnected, isLoading } = useCouple();
@@ -104,8 +105,8 @@ export default function ChatScreen() {
 
     // Check connection and redirect if needed
     if (!isConnected || !coupleData) {
-      console.log('Chat: Not connected, redirecting to pairing');
-      router.replace('/pairing');
+      console.log('Chat: Not connected, redirecting to auth');
+      router.replace('/(auth)/auth');
       return;
     }
 
@@ -122,15 +123,13 @@ export default function ChatScreen() {
 
   const requestAudioPermission = async () => {
     try {
-      if (recorder && recorder.requestPermissionsAsync) {
-        const permission = await recorder.requestPermissionsAsync();
-        setAudioPermission(permission.granted);
-      } else {
-        console.warn('Audio recorder not available');
-        setAudioPermission(false);
-      }
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      setAudioPermission(true);
     } catch (error) {
-      console.error('Error requesting audio permission:', error);
+      console.error('Error setting audio mode:', error);
       setAudioPermission(false);
     }
   };
@@ -220,14 +219,29 @@ export default function ChatScreen() {
 
     try {
       const messagesRef = collection(db, 'couples', coupleData.coupleCode, 'chat');
-      await addDoc(messagesRef, {
+      const messageData: any = {
         sender: coupleData.nickname,
         message: content,
         timestamp: serverTimestamp(),
         reactions: {},
         type: mediaType || 'text',
-        mediaUrl: mediaUrl || undefined
-      });
+      };
+      
+      // Only include mediaUrl if it has a value
+      if (mediaUrl) {
+        messageData.mediaUrl = mediaUrl;
+      }
+      
+      await addDoc(messagesRef, messageData);
+
+      // Send notification to partner
+      try {
+        const { notifyNewMessage } = await import('@/services/notifications');
+        const preview = content.length > 50 ? content.substring(0, 50) + '...' : content;
+        await notifyNewMessage(coupleData.coupleCode, coupleData.nickname, preview);
+      } catch (error) {
+        console.log('Notification error:', error);
+      }
 
       if (!mediaUrl) {
         setInputText('');
@@ -298,51 +312,54 @@ export default function ChatScreen() {
   };
 
   const startRecording = async () => {
-    if (!audioPermission) {
-      Alert.alert('Microphone Permission', 'Microphone access is needed to record voice messages');
-      return;
-    }
-
     try {
-      if (recorder && recorder.prepareAsync && recorder.startAsync) {
-        await recorder.prepareAsync();
-        await recorder.startAsync();
-        setIsRecording(true);
-        setRecordingDuration(0);
-
-        // Start timer
-        recordingTimer.current = setInterval(() => {
-          setRecordingDuration(prev => prev + 1);
-        }, 1000);
-      } else {
-        Alert.alert('Error', 'Audio recording not available on this platform');
+      if (!recorder) {
+        Alert.alert('Error', 'Recorder not available');
+        return;
       }
-    } catch (error) {
+
+      console.log('Starting chat recording...');
+      await recorder.prepareToRecordAsync();
+      await recorder.startAsync();
+      
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      // Start timer
+      recordingTimer.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+    } catch (error: any) {
       console.error('Error starting recording:', error);
-      Alert.alert('Error', 'Failed to start recording');
+      Alert.alert('Error', `Failed to start recording: ${error}`);
     }
   };
 
   const stopRecording = async () => {
-    if (!recorder || !recorder.isRecording) return;
+    if (!recorder || !isRecording) return;
 
     try {
-      setIsRecording(false);
+      console.log('Stopping chat recording...');
       if (recordingTimer.current) {
         clearInterval(recordingTimer.current);
         recordingTimer.current = null;
       }
 
-      const uri = await recorder.stopAsync();
-      setRecordingDuration(0);
-
-      if (uri) {
-        setCurrentRecordingUri(uri);
-        await uploadAndSendMedia(uri, 'audio');
+      await recorder.stopAndUnloadAsync();
+      
+      // Get the recording URI
+      const recordingURI = recorder.getURI();
+      if (recordingURI) {
+        setCurrentRecordingUri(recordingURI);
+        console.log('Recording saved to:', recordingURI);
       }
+      
+      setIsRecording(false);
+      setRecordingDuration(0);
     } catch (error) {
       console.error('Error stopping recording:', error);
-      Alert.alert('Error', 'Failed to stop recording');
+      Alert.alert('Error', `Failed to stop recording: ${error}`);
+      setIsRecording(false);
     }
   };
 
@@ -350,18 +367,13 @@ export default function ChatScreen() {
     if (!coupleData) return;
 
     try {
-      // Create a blob from the URI
-      const response = await fetch(uri);
-      const blob = await response.blob();
-
-      // Create a reference to the file in Firebase Storage
-      const timestamp = Date.now();
-      const fileName = `${type}s/${coupleData.coupleCode}/${timestamp}.${type === 'image' ? 'jpg' : 'm4a'}`;
-      const storageRef = ref(storage, fileName);
-
-      // Upload the file
-      await uploadBytes(storageRef, blob);
-      const downloadURL = await getDownloadURL(storageRef);
+      let downloadURL: string;
+      
+      if (type === 'image') {
+        downloadURL = await uploadPhotoToCloudinary(uri);
+      } else {
+        downloadURL = await uploadAudioToCloudinary(uri);
+      }
 
       // Send the message with media URL
       await sendMessage(
@@ -415,18 +427,54 @@ export default function ChatScreen() {
     }
   };
 
-  const stopAllAudio = async () => {
-    try {
-      for (const player of Object.values(playingAudio)) {
-        if (player && player.pause) {
-          player.pause();
-        }
-      }
-      setPlayingAudio({});
-    } catch (error) {
-      console.error('Error stopping audio:', error);
+const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMessage: boolean }) => {
+  const player = useAudioPlayer(item.mediaUrl!);
+  const isPlaying = player?.playing || false;
+
+  // Simple string hash to generate consistent waveform heights
+  const seededRandom = (seedStr: string, i: number) => {
+    let hash = 0;
+    for (let c = 0; c < seedStr.length; c++) {
+      hash = ((hash << 5) - hash) + seedStr.charCodeAt(c) + i;
+      hash |= 0;
     }
+    const x = Math.sin(hash++) * 10000;
+    return x - Math.floor(x);
   };
+
+  return (
+    <View style={styles.audioMessage}>
+      <TouchableOpacity
+        style={styles.audioPlayButton}
+        onPress={() => {
+          if (isPlaying) player.pause();
+          else player.play();
+        }}
+      >
+        {isPlaying ? (
+          <Pause size={20} color={isMyMessage ? "#ffffff" : "#ff6b9d"} />
+        ) : (
+          <Play size={20} color={isMyMessage ? "#ffffff" : "#ff6b9d"} />
+        )}
+      </TouchableOpacity>
+      <View style={styles.audioWaveform}>
+        {[...Array(8)].map((_, i) => (
+          <View
+            key={i}
+            style={[
+              styles.audioBar,
+              {
+                height: seededRandom(item.id, i) * 20 + 10,
+                backgroundColor: isMyMessage ? "#ffffff" : "#ff6b9d",
+                opacity: isPlaying ? 0.8 : 0.4,
+              }
+            ]}
+          />
+        ))}
+      </View>
+    </View>
+  );
+};
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -436,7 +484,6 @@ export default function ChatScreen() {
 
   const renderMessage = ({ item, index }: { item: ChatMessage; index: number }) => {
     const isMyMessage = item.sender === coupleData?.nickname;
-    const isPlaying = !!playingAudio[item.id];
     
     return (
       <Animated.View 
@@ -463,33 +510,7 @@ export default function ChatScreen() {
           )}
           
           {item.type === 'audio' && item.mediaUrl && (
-            <View style={styles.audioMessage}>
-              <TouchableOpacity
-                style={styles.audioPlayButton}
-                onPress={() => playAudio(item.id, item.mediaUrl!)}
-              >
-                {isPlaying ? (
-                  <Pause size={20} color={isMyMessage ? "#ffffff" : "#ff6b9d"} />
-                ) : (
-                  <Play size={20} color={isMyMessage ? "#ffffff" : "#ff6b9d"} />
-                )}
-              </TouchableOpacity>
-              <View style={styles.audioWaveform}>
-                {[...Array(8)].map((_, i) => (
-                  <View
-                    key={i}
-                    style={[
-                      styles.audioBar,
-                      {
-                        height: Math.random() * 20 + 10,
-                        backgroundColor: isMyMessage ? "#ffffff" : "#ff6b9d",
-                        opacity: isPlaying ? 0.8 : 0.4,
-                      }
-                    ]}
-                  />
-                ))}
-              </View>
-            </View>
+            <AudioMessageBubble item={item} isMyMessage={isMyMessage} />
           )}
           
           {item.type === 'text' && (
@@ -813,7 +834,7 @@ const styles = StyleSheet.create({
   },
   messagesContent: {
     padding: 16,
-    paddingBottom: 20,
+    paddingBottom: 100,
   },
   messageContainer: {
     marginBottom: 16,

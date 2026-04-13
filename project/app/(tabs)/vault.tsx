@@ -8,15 +8,24 @@ import {
   Alert,
   Image,
   Animated,
+  Modal,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Archive, Plus, FileText, Image as ImageIcon, Mic, Heart, Star } from 'lucide-react-native';
+import { Archive, Plus, FileText, Image as ImageIcon, Mic, Heart, Star, X, Send } from 'lucide-react-native';
 import { useCouple } from '@/hooks/useCouple';
 import { useRouter } from 'expo-router';
-import { collection, query, orderBy, onSnapshot } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { VaultItem } from '@/types/app';
+import * as ImagePicker from 'expo-image-picker';
+import { useAudioRecorder, useAudioPlayer } from 'expo-audio';
+import AudioPlayer from '@/components/AudioPlayer';
+import { checkStorageQuota } from '@/services/storage';
+import * as Audio from 'expo-audio';
 
 export default function VaultScreen() {
   const { coupleData, isConnected, isLoading } = useCouple();
@@ -25,6 +34,60 @@ export default function VaultScreen() {
   const [activeTab, setActiveTab] = useState<'all' | 'letters' | 'photos' | 'audios'>('all');
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
+  
+  // Modal states
+  const [showLetterModal, setShowLetterModal] = useState(false);
+  const [letterContent, setLetterContent] = useState('');
+  const [letterTitle, setLetterTitle] = useState('');
+  const [isUploadingLetter, setIsUploadingLetter] = useState(false);
+  
+  const [showAudioModal, setShowAudioModal] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
+  const recordingTimer = useRef<NodeJS.Timeout | null>(null);
+  
+  const recorder = useAudioRecorder({
+    android: {
+      extension: '.m4a',
+      outputFormat: 'mpeg4',
+      audioEncoder: 'aac',
+      sampleRate: 44100,
+      numberOfChannels: 2,
+      bitRate: 128000,
+    },
+    ios: {
+      extension: '.m4a',
+      outputFormat: 'mpeg4aac',
+      audioQuality: 'max',
+      sampleRate: 44100,
+      numberOfChannels: 2,
+      bitRate: 128000,
+      linearPCMBitDepth: 16,
+      linearPCMIsBigEndian: false,
+      linearPCMIsFloat: false,
+    },
+    web: {
+      mimeType: 'audio/webm',
+      bitsPerSecond: 128000,
+    },
+  });
+
+  const requestAudioPermission = async () => {
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+    } catch (error) {
+      console.error('Error setting audio mode:', error);
+    }
+  };
+
+  useEffect(() => {
+    // Set up audio mode on mount
+    requestAudioPermission();
+  }, []);
 
   useEffect(() => {
     // Wait for loading to complete
@@ -34,8 +97,8 @@ export default function VaultScreen() {
 
     // Check connection and redirect if needed
     if (!isConnected || !coupleData) {
-      console.log('Vault: Not connected, redirecting to pairing');
-      router.replace('/pairing');
+      console.log('Vault: Not connected, redirecting to auth');
+      router.replace('/(auth)/auth');
       return;
     }
 
@@ -89,8 +152,219 @@ export default function VaultScreen() {
 
   const filteredItems = activeTab === 'all' ? vaultItems : vaultItems.filter(item => item.type + 's' === activeTab);
 
-  const handleAddItem = (type: 'letter' | 'photo' | 'audio') => {
-    Alert.alert('Coming Soon', `${type} creation will be implemented soon! 💕`);
+  const handleAddItem = async (type: 'letter' | 'photo' | 'audio') => {
+    if (!coupleData) return;
+    
+    // Check storage quota
+    const quota = await checkStorageQuota(coupleData.coupleCode);
+    if (!quota.isWithinQuota) {
+      Alert.alert(
+        'Storage Limit Reached',
+        `You have used ${quota.used}MB of your ${quota.quota}MB limit. Please upgrade your plan or delete some items to add more.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    if (type === 'letter') {
+      setLetterTitle('');
+      setLetterContent('');
+      setShowLetterModal(true);
+    } else if (type === 'photo') {
+      pickImage();
+    } else if (type === 'audio') {
+      setShowAudioModal(true);
+      setRecordingDuration(0);
+      setCurrentRecordingUri(null);
+    }
+  };
+
+  const pickImage = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [4, 3],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        await uploadPhoto(result.assets[0].uri);
+      }
+    } catch (error) {
+      console.error('Error picking image:', error);
+      Alert.alert('Error', 'Failed to pick image');
+    }
+  };
+
+  const uploadPhoto = async (uri: string) => {
+    if (!coupleData) return;
+    
+    try {
+      const photoUrl = await uploadPhotoToCloudinary(uri);
+
+      const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
+      await addDoc(vaultRef, {
+        type: 'photo',
+        title: `Photo from ${new Date().toLocaleDateString()}`,
+        author: coupleData.nickname,
+        url: photoUrl,
+        timestamp: serverTimestamp(),
+        favorite: false,
+        tags: ['memory'],
+      });
+
+      // Send notification to partner
+      try {
+        const { notifyMemory } = await import('@/services/notifications');
+        await notifyMemory(coupleData.coupleCode, coupleData.nickname, 'photo');
+      } catch (error) {
+        console.log('Notification error:', error);
+      }
+
+      Alert.alert('Success', '✨ Photo saved to your vault!');
+    } catch (error) {
+      console.error('Error uploading photo:', error);
+      Alert.alert('Error', 'Failed to upload photo');
+    }
+  };
+
+  const saveLetter = async () => {
+    if (!coupleData || !letterTitle.trim() || !letterContent.trim()) {
+      Alert.alert('Missing fields', 'Please add a title and content');
+      return;
+    }
+
+    try {
+      setIsUploadingLetter(true);
+      const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
+      await addDoc(vaultRef, {
+        type: 'letter',
+        title: letterTitle.trim(),
+        content: letterContent.trim(),
+        author: coupleData.nickname,
+        timestamp: serverTimestamp(),
+        favorite: false,
+        tags: ['letter'],
+      });
+
+      // Send notification to partner
+      try {
+        const { notifyMemory } = await import('@/services/notifications');
+        await notifyMemory(coupleData.coupleCode, coupleData.nickname, 'letter');
+      } catch (error) {
+        console.log('Notification error:', error);
+      }
+
+      setShowLetterModal(false);
+      setLetterTitle('');
+      setLetterContent('');
+      Alert.alert('Success', '💌 Letter saved to your vault!');
+    } catch (error) {
+      console.error('Error saving letter:', error);
+      Alert.alert('Error', 'Failed to save letter');
+    } finally {
+      setIsUploadingLetter(false);
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      if (!recorder) {
+        Alert.alert('Error', 'Recorder not available');
+        return;
+      }
+
+      // Make sure audio mode is set
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      console.log('Starting recording...');
+      await recorder.prepareToRecordAsync();
+      await recorder.startAsync();
+      
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      recordingTimer.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+    } catch (error) {
+      console.error('Error starting recording:', error);
+      Alert.alert('Error', `Failed to start recording: ${error}`);
+    }
+  };
+
+  const stopRecording = async () => {
+    try {
+      if (recordingTimer.current) clearInterval(recordingTimer.current);
+      
+      if (recorder && isRecording) {
+        console.log('Stopping recording...');
+        await recorder.stopAndUnloadAsync();
+        
+        // Get the recording URI
+        const recordingURI = recorder.getURI();
+        if (recordingURI) {
+          setCurrentRecordingUri(recordingURI);
+          console.log('Recording saved to:', recordingURI);
+        } else {
+          Alert.alert('Error', 'Failed to get recording URI');
+        }
+        
+        setIsRecording(false);
+      }
+    } catch (error) {
+      console.error('Error stopping recording:', error);
+      Alert.alert('Error', `Failed to stop recording: ${error}`);
+    }
+  };
+
+  const saveAudio = async () => {
+    if (!coupleData || !currentRecordingUri) {
+      Alert.alert('Error', 'No audio recorded');
+      return;
+    }
+
+    try {
+      const audioUrl = await uploadAudioToCloudinary(currentRecordingUri);
+
+      const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
+      await addDoc(vaultRef, {
+        type: 'audio',
+        title: `Voice memo from ${new Date().toLocaleDateString()}`,
+        author: coupleData.nickname,
+        url: audioUrl,
+        duration: recordingDuration,
+        timestamp: serverTimestamp(),
+        favorite: false,
+        tags: ['voice-memo'],
+      });
+
+      // Send notification to partner
+      try {
+        const { notifyMemory } = await import('@/services/notifications');
+        await notifyMemory(coupleData.coupleCode, coupleData.nickname, 'audio');
+      } catch (error) {
+        console.log('Notification error:', error);
+      }
+
+      setShowAudioModal(false);
+      setCurrentRecordingUri(null);
+      setRecordingDuration(0);
+      Alert.alert('Success', '🎤 Voice memo saved to your vault!');
+    } catch (error) {
+      console.error('Error saving audio:', error);
+      Alert.alert('Error', 'Failed to save audio');
+    }
+  };
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   const renderVaultItem = (item: VaultItem, index: number) => (
@@ -130,8 +404,14 @@ export default function VaultScreen() {
         <Image source={{ uri: item.url }} style={styles.photoPreview} />
       )}
       
+      {item.type === 'audio' && item.url && (
+        <View style={{ marginVertical: 10 }}>
+          <AudioPlayer audioUrl={item.url} duration={item.duration} />
+        </View>
+      )}
+
       {item.content && (
-        <Text style={styles.vaultItemPreview} numberOfLines={2}>
+        <Text style={styles.vaultItemPreview} numberOfLines={3}>
           {item.content}
         </Text>
       )}
@@ -310,6 +590,109 @@ export default function VaultScreen() {
               </LinearGradient>
             </TouchableOpacity>
           </Animated.View>
+
+        {/* Letter Modal */}
+        <Modal 
+          visible={showLetterModal}
+          animationType="slide"
+          transparent={false}
+        >
+          <LinearGradient colors={['#a29bfe', '#6c5ce7']} style={styles.container}>
+            <SafeAreaView style={styles.modalSafeArea}>
+              <View style={styles.modalHeader}>
+                <TouchableOpacity onPress={() => setShowLetterModal(false)}>
+                  <X size={24} color="#ffffff" />
+                </TouchableOpacity>
+                <Text style={styles.modalTitle}>Write Letter 💌</Text>
+                <TouchableOpacity 
+                  onPress={saveLetter}
+                  disabled={isUploadingLetter}
+                >
+                  <Send size={24} color={isUploadingLetter ? '#cccccc' : '#ffffff'} />
+                </TouchableOpacity>
+              </View>
+
+              <KeyboardAvoidingView 
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                style={styles.modalContent}
+              >
+                <TextInput
+                  style={styles.letterTitleInput}
+                  placeholder="Letter Title..."
+                  placeholderTextColor="#999"
+                  value={letterTitle}
+                  onChangeText={setLetterTitle}
+                  maxLength={100}
+                />
+                <TextInput
+                  style={styles.letterContentInput}
+                  placeholder="Write your letter here..."
+                  placeholderTextColor="#999"
+                  value={letterContent}
+                  onChangeText={setLetterContent}
+                  multiline
+                  maxLength={5000}
+                />
+              </KeyboardAvoidingView>
+            </SafeAreaView>
+          </LinearGradient>
+        </Modal>
+
+        {/* Audio Modal */}
+        <Modal 
+          visible={showAudioModal}
+          animationType="slide"
+          transparent={false}
+        >
+          <LinearGradient colors={['#e17055', '#d63031']} style={styles.container}>
+            <SafeAreaView style={styles.modalSafeArea}>
+              <View style={styles.modalHeader}>
+                <TouchableOpacity onPress={() => setShowAudioModal(false)}>
+                  <X size={24} color="#ffffff" />
+                </TouchableOpacity>
+                <Text style={styles.modalTitle}>Record Voice Memo 🎤</Text>
+                <TouchableOpacity 
+                  onPress={currentRecordingUri ? saveAudio : () => {}}
+                  disabled={!currentRecordingUri}
+                >
+                  <Send size={24} color={currentRecordingUri ? '#ffffff' : '#cccccc'} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.audioContent}>
+                <View style={styles.audioDisplay}>
+                  <Mic size={48} color="#ffffff" />
+                  <Text style={styles.durationText}>{formatDuration(recordingDuration)}</Text>
+                  {isRecording && (
+                    <View style={styles.recordingIndicator}>
+                      <View style={styles.recordingDot} />
+                      <Text style={styles.recordingText}>Recording...</Text>
+                    </View>
+                  )}
+                </View>
+
+                <View style={styles.audioButtonsContainer}>
+                  {!isRecording ? (
+                    <TouchableOpacity 
+                      style={styles.recordButton}
+                      onPress={startRecording}
+                    >
+                      <Mic size={28} color="#ffffff" />
+                      <Text style={styles.recordButtonText}>Start Recording</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity 
+                      style={[styles.recordButton, styles.stopButton]}
+                      onPress={stopRecording}
+                    >
+                      <Text style={styles.recordButtonText}>Stop</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            </SafeAreaView>
+          </LinearGradient>
+        </Modal>
         </View>
       </SafeAreaView>
     </LinearGradient>
@@ -390,6 +773,7 @@ const styles = StyleSheet.create({
   },
   vaultList: {
     flex: 1,
+    paddingBottom: 100,
   },
   vaultItem: {
     backgroundColor: '#ffffff',
@@ -566,5 +950,101 @@ const styles = StyleSheet.create({
     fontSize: 24,
     color: '#ffffff',
     fontFamily: 'Inter-Bold',
+  },
+  modalSafeArea: {
+    flex: 1,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontFamily: 'Playfair-Bold',
+    color: '#ffffff',
+  },
+  modalContent: {
+    flex: 1,
+    padding: 20,
+  },
+  letterTitleInput: {
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 16,
+    fontFamily: 'Inter-SemiBold',
+    marginBottom: 12,
+    color: '#333',
+  },
+  letterContentInput: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 14,
+    fontFamily: 'Inter-Regular',
+    textAlignVertical: 'top',
+    color: '#333',
+  },
+  audioContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  audioDisplay: {
+    alignItems: 'center',
+    marginBottom: 40,
+  },
+  durationText: {
+    fontSize: 48,
+    fontFamily: 'Inter-Bold',
+    color: '#ffffff',
+    marginTop: 16,
+    marginBottom: 16,
+  },
+  recordingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ff6b6b',
+    marginRight: 8,
+  },
+  recordingText: {
+    fontSize: 14,
+    fontFamily: 'Inter-SemiBold',
+    color: '#ffffff',
+  },
+  audioButtonsContainer: {
+    width: '100%',
+  },
+  recordButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 20,
+    padding: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stopButton: {
+    backgroundColor: '#ff6b6b',
+  },
+  recordButtonText: {
+    fontSize: 16,
+    fontFamily: 'Inter-SemiBold',
+    color: '#ffffff',
+    marginLeft: 12,
   },
 });

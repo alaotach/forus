@@ -69,7 +69,7 @@ export default function ParagraphScreen() {
     if (!coupleData) return;
 
     try {
-      const paragraphRef = doc(db, 'dailyParagraphs', coupleData.coupleCode, targetDate, coupleData.nickname);
+      const paragraphRef = doc(db, 'dailyParagraphs', `${coupleData.coupleCode}_${targetDate}_${coupleData.nickname}`);
       const paragraphDoc = await getDoc(paragraphRef);
 
       if (paragraphDoc.exists()) {
@@ -80,20 +80,45 @@ export default function ParagraphScreen() {
         setIsEditing(true);
       } else {
         setIsLoadingPrompt(true);
-        // Get partner nickname for context
-        const coupleRef = doc(db, 'couples', coupleData.coupleCode);
-        const coupleDoc = await getDoc(coupleRef);
-        let partnerNickname = '';
         
-        if (coupleDoc.exists()) {
-          const users = coupleDoc.data().users || {};
-          partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname) || '';
-        }
+        // Check if prompt is already cached for today
+        const promptCacheId = `${coupleData.coupleCode}_${targetDate}`;
+        const promptCacheRef = doc(db, 'promptCache', promptCacheId);
+        const promptCacheDoc = await getDoc(promptCacheRef);
+        
+        let generatedPrompt = '';
+        if (promptCacheDoc.exists()) {
+          // Use cached prompt
+          generatedPrompt = promptCacheDoc.data().prompt || '';
+          console.log('Using cached prompt');
+        } else {
+          // Generate new prompt
+          const coupleRef = doc(db, 'couples', coupleData.coupleCode);
+          const coupleDoc = await getDoc(coupleRef);
+          let partnerNickname = '';
+          
+          if (coupleDoc.exists()) {
+            const users = coupleDoc.data().users || {};
+            partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname) || '';
+          }
 
-        const generatedPrompt = await getTodaysPrompt({
-          nickname: coupleData.nickname,
-          partnerNickname,
-        });
+          generatedPrompt = await getTodaysPrompt({
+            nickname: coupleData.nickname,
+            partnerNickname,
+          });
+          
+          // Cache the prompt for future use
+          try {
+            await setDoc(promptCacheRef, {
+              prompt: generatedPrompt,
+              createdAt: serverTimestamp(),
+            });
+            console.log('Prompt cached successfully');
+          } catch (cacheError) {
+            console.error('Error caching prompt:', cacheError);
+          }
+        }
+        
         setPrompt(generatedPrompt);
         setIsLoadingPrompt(false);
         setIsEditing(false);
@@ -116,7 +141,7 @@ export default function ParagraphScreen() {
         const partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname);
         
         if (partnerNickname) {
-          const partnerRef = doc(db, 'dailyParagraphs', coupleData.coupleCode, targetDate, partnerNickname);
+          const partnerRef = doc(db, 'dailyParagraphs', `${coupleData.coupleCode}_${targetDate}_${partnerNickname}`);
           const partnerDoc = await getDoc(partnerRef);
           
           if (partnerDoc.exists()) {
@@ -146,7 +171,7 @@ export default function ParagraphScreen() {
     setIsSaving(true);
 
     try {
-      const paragraphRef = doc(db, 'dailyParagraphs', coupleData.coupleCode, targetDate, coupleData.nickname);
+      const paragraphRef = doc(db, 'dailyParagraphs', `${coupleData.coupleCode}_${targetDate}_${coupleData.nickname}`);
       const wordCount = content.trim().split(/\s+/).length;
 
       const paragraphData = {
@@ -189,6 +214,19 @@ export default function ParagraphScreen() {
             lastParagraphDate: today,
             longestParagraphStreak,
           });
+        }
+
+        // Send notification to partner
+        try {
+          const { notifyDailyParagraph } = await import('@/services/notifications');
+          const coupleRef = doc(db, 'couples', coupleData.coupleCode);
+          const coupleDoc = await getDoc(coupleRef);
+          const partnerNickname = Object.keys(coupleDoc.data()?.users || {}).find(
+            name => name !== coupleData.nickname
+          );
+          await notifyDailyParagraph(coupleData.coupleCode, partnerNickname || 'your partner');
+        } catch (error) {
+          console.log('Notification error:', error);
         }
       }
 
