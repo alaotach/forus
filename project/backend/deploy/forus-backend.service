@@ -4,10 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=ec2-user
-WorkingDirectory=/opt/forus/backend
-EnvironmentFile=/opt/forus/backend/.env
-ExecStart=/usr/bin/node /opt/forus/backend/server.js
+User=aloo
+WorkingDirectory=/home/aloo/forus/project/backend
+EnvironmentFile=/home/aloo/forus/project/backend/.env
+ExecStart=/usr/bin/node /home/aloo/forus/project/backend/server.js
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
@@ -18,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/forus/backend
+ReadWritePaths=/home/aloo/forus/project/backend
 
 [Install]
 WantedBy=multi-user.target

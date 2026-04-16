@@ -1,7 +1,7 @@
-# EC2 Deployment Runbook (Amazon Linux 2023)
+# EC2 Deployment Runbook (Ubuntu)
 
 ## 1. Launch EC2
-- AMI: Amazon Linux 2023
+- AMI: Ubuntu 22.04/24.04 LTS
 - Instance type: t3.small (minimum recommended)
 - Security Group inbound:
   - 22 (SSH) from your IP only
@@ -18,21 +18,18 @@ If using IAM role, do NOT set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in .env.
 
 ## 3. Server bootstrap
 ```bash
-sudo dnf update -y
-sudo dnf install -y nginx git
-curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-sudo dnf install -y nodejs
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y nginx git curl
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
 node -v
 npm -v
 ```
 
 ## 4. Deploy app code
 ```bash
-sudo mkdir -p /opt/forus
-sudo chown -R ec2-user:ec2-user /opt/forus
-cd /opt/forus
-git clone <YOUR_REPO_URL> .
-cd backend
+# You already have code at /home/aloo/forus
+cd /home/aloo/forus/project/backend
 npm ci --omit=dev
 ```
 
@@ -58,7 +55,7 @@ Set at least:
 
 ## 6. Install systemd service
 ```bash
-sudo cp /opt/forus/backend/deploy/forus-backend.service /etc/systemd/system/forus-backend.service
+sudo cp /home/aloo/forus/project/backend/deploy/forus-backend.service /etc/systemd/system/forus-backend.service
 sudo systemctl daemon-reload
 sudo systemctl enable forus-backend
 sudo systemctl start forus-backend
@@ -67,8 +64,10 @@ sudo systemctl status forus-backend --no-pager
 
 ## 7. Configure Nginx reverse proxy
 ```bash
-sudo cp /opt/forus/backend/deploy/nginx-forus-backend.conf /etc/nginx/conf.d/forus-backend.conf
-sudo sed -i 's/api.example.com/api.yourdomain.com/g' /etc/nginx/conf.d/forus-backend.conf
+sudo cp /home/aloo/forus/project/backend/deploy/nginx-forus-backend.conf /etc/nginx/sites-available/forus-backend
+sudo sed -i 's/api.example.com/api.yourdomain.com/g' /etc/nginx/sites-available/forus-backend
+sudo ln -sf /etc/nginx/sites-available/forus-backend /etc/nginx/sites-enabled/forus-backend
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl enable nginx
 sudo systemctl restart nginx
@@ -76,8 +75,16 @@ sudo systemctl restart nginx
 
 ## 8. Enable HTTPS (Let's Encrypt)
 ```bash
-sudo dnf install -y certbot python3-certbot-nginx
+sudo apt install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d api.yourdomain.com
+```
+
+## 8.1 Optional firewall (UFW)
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
+sudo ufw enable
+sudo ufw status
 ```
 
 ## 9. Validate
