@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import React, { useEffect } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native'; 
 import { Play, Pause, Square } from 'lucide-react-native';
-import { useAudioPlayer } from 'expo-audio';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 
 interface AudioPlayerProps {
   audioUrl: string;
@@ -10,44 +10,36 @@ interface AudioPlayerProps {
 }
 
 export default function AudioPlayer({ audioUrl, duration, onPlaybackFinish }: AudioPlayerProps) {
-  const [isLoading, setIsLoading] = useState(false);
   const player = useAudioPlayer(audioUrl);
+  const status = useAudioPlayerStatus(player);
 
   useEffect(() => {
-    // Set up playback status listener
-    const subscription = player.addListener('playbackStatusUpdate', (status) => {
-      if (status.isLoaded) {
-        setIsLoading(false);
-        if (status.didJustFinish && onPlaybackFinish) {
-          onPlaybackFinish();
-        }
+    if (status.didJustFinish) {
+      if (onPlaybackFinish) {
+        onPlaybackFinish();
       }
-    });
+      player.seekTo(0);
+      player.pause();
+    }
+  }, [status.didJustFinish, player, onPlaybackFinish]);
 
-    return () => {
-      subscription.remove();
-    };
-  }, [player, onPlaybackFinish]);
-
-  const handlePlayPause = async () => {
+  const handlePlayPause = () => {
     try {
-      if (player.playing) {
-        await player.pause();
+      if (status.playing) {
+        player.pause();
       } else {
-        setIsLoading(true);
-        await player.play();
+        player.play();
       }
     } catch (error) {
       console.error('Playback error:', error);
       Alert.alert('Error', 'Failed to play audio');
-      setIsLoading(false);
     }
   };
 
-  const handleStop = async () => {
+  const handleStop = () => {
     try {
-      await player.seekTo(0);
-      await player.pause();
+      player.seekTo(0);
+      player.pause();
     } catch (error) {
       console.error('Stop error:', error);
     }
@@ -61,25 +53,25 @@ export default function AudioPlayer({ audioUrl, duration, onPlaybackFinish }: Au
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity style={styles.playButton} onPress={handlePlayPause}>
-        {isLoading ? (
+      <TouchableOpacity style={styles.playButton} onPress={handlePlayPause}>    
+        {!status.isLoaded || status.isBuffering ? (
           <Text style={styles.loadingText}>...</Text>
-        ) : player.playing ? (
+        ) : status.playing ? (
           <Pause size={20} color="#ffffff" />
         ) : (
           <Play size={20} color="#ffffff" />
         )}
       </TouchableOpacity>
-      
+
       <View style={styles.info}>
         <View style={styles.waveform}>
           {Array.from({ length: 12 }).map((_, i) => (
-            <View 
-              key={i} 
+            <View
+              key={i}
               style={[
                 styles.waveBar,
-                player.playing && styles.activeWaveBar
-              ]} 
+                status.playing && styles.activeWaveBar
+              ]}
             />
           ))}
         </View>
@@ -90,7 +82,7 @@ export default function AudioPlayer({ audioUrl, duration, onPlaybackFinish }: Au
         )}
       </View>
 
-      {player.playing && (
+      {status.playing && (
         <TouchableOpacity style={styles.stopButton} onPress={handleStop}>
           <Square size={16} color="#666" />
         </TouchableOpacity>

@@ -16,9 +16,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Heart, Sparkles, Lock, Clock as Unlock } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useCouple } from '@/hooks/useCouple';
-import { doc, setDoc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, serverTimestamp, Timestamp, onSnapshot } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { getTodaysDeepQuestion } from '@/services/prompts';
+import { generateDeepQuestion } from '@/services/openai';
 import { DeepTalk } from '@/types/app';
 
 export default function DeepTalkScreen() {
@@ -32,9 +33,12 @@ export default function DeepTalkScreen() {
   const [isLoadingQuestion, setIsLoadingQuestion] = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
+  const mounted = useRef(true);
 
   useEffect(() => {
-    loadTodaysDeepTalk();
+    if (!coupleData) return;
+    mounted.current = true;
+    const unsubscribe = loadTodaysDeepTalk();
     getPartnerNickname();
 
     // Animate in
@@ -50,7 +54,16 @@ export default function DeepTalkScreen() {
         useNativeDriver: true,
       }),
     ]).start();
-  }, []);
+
+    return () => {
+      mounted.current = false;
+      if (unsubscribe) {
+        unsubscribe.then((unsub: any) => {
+          if (typeof unsub === 'function') unsub();
+        });
+      }
+    };
+  }, [coupleData?.coupleCode, coupleData?.nickname]);
 
   const getPartnerNickname = async () => {
     if (!coupleData) return;
@@ -76,65 +89,108 @@ export default function DeepTalkScreen() {
 
     try {
       const today = new Date().toISOString().split('T')[0];
-      const deepTalkRef = doc(db, 'deepTalks', coupleData.coupleCode, today);
+      const deepTalkRef = doc(db, 'deepTalks', coupleData.coupleCode, 'items', today);
       const deepTalkDoc = await getDoc(deepTalkRef);
+
+      const resolveDeepQuestion = async () => {
+        const coupleRef = doc(db, 'couples', coupleData.coupleCode);
+        const coupleDoc = await getDoc(coupleRef);
+        let resolvedPartnerNickname = '';
+        
+        if (coupleDoc.exists()) {
+          const users = coupleDoc.data().users || {};
+          resolvedPartnerNickname = Object.keys(users).find(name => name !== coupleData.nickname) || '';
+        }
+
+        let question = await getTodaysDeepQuestion({
+          nickname: coupleData.nickname,
+          partnerNickname: resolvedPartnerNickname,
+          coupleCode: coupleData.coupleCode,
+        });
+
+        if (!question?.trim()) {
+          question = await generateDeepQuestion({
+            nickname: coupleData.nickname,
+            partnerNickname: resolvedPartnerNickname,
+            coupleCode: coupleData.coupleCode,
+          });
+        }
+
+        if (!question?.trim()) {
+          throw new Error('Failed to generate deep question');
+        }
+
+        return question.trim();
+      };
 
       if (deepTalkDoc.exists()) {
         const data = deepTalkDoc.data() as DeepTalk;
-        setDeepTalk(data);
-        setTodaysQuestion(data.question);
+        const existingQuestion = data.question?.trim();
+        if (existingQuestion) {
+          setDeepTalk(data);
+          setTodaysQuestion(existingQuestion);
+        } else {
+          const repairedQuestion = await resolveDeepQuestion();
+          const repairedDeepTalk: DeepTalk = {
+            ...data,
+            question: repairedQuestion,
+          };
+          await updateDoc(deepTalkRef, { question: repairedQuestion });
+          setDeepTalk(repairedDeepTalk);
+          setTodaysQuestion(repairedQuestion);
+        }
         
         if (data.responses[coupleData.nickname]) {
           setMyAnswer(data.responses[coupleData.nickname].answer);
         }
       } else {
         setIsLoadingQuestion(true);
-        // Get partner nickname for context
-        const coupleRef = doc(db, 'couples', coupleData.coupleCode);
-        const coupleDoc = await getDoc(coupleRef);
-        let partnerNickname = '';
-        
-        if (coupleDoc.exists()) {
-          const users = coupleDoc.data().users || {};
-          partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname) || '';
-        }
-
-        const question = await getTodaysDeepQuestion({
-          nickname: coupleData.nickname,
-          partnerNickname,
-        });
-        setTodaysQuestion(question);
+        const safeQuestion = await resolveDeepQuestion();
+        setTodaysQuestion(safeQuestion);
         setIsLoadingQuestion(false);
         
         // Create new deep talk entry
         const newDeepTalk: DeepTalk = {
           id: today,
           date: today,
-          question,
+          question: safeQuestion,
           responses: {},
           unlocked: false,
         };
         
-        await setDoc(deepTalkRef, newDeepTalk);
-        setDeepTalk(newDeepTalk);
+        if (mounted.current) {
+          await setDoc(deepTalkRef, newDeepTalk);
+          setDeepTalk(newDeepTalk);
+        }
       }
+
+      // Hook up onSnapshot for real-time response syncying and unlocks
+      const unsubscribe = onSnapshot(deepTalkRef, (snapshot) => {
+        if (!mounted.current) return;
+        if (snapshot.exists()) {
+          const syncData = snapshot.data() as DeepTalk;
+          setDeepTalk(syncData);
+          if (syncData.responses[coupleData.nickname]) {
+            setMyAnswer(syncData.responses[coupleData.nickname].answer);
+          }
+        }
+      });
+      
+      return unsubscribe;
     } catch (error) {
       console.error('Error loading deep talk:', error);
-      setIsLoadingQuestion(false);
+      if (mounted.current) setIsLoadingQuestion(false);
     }
   };
 
   const saveAnswer = async () => {
-    if (!myAnswer.trim() || !coupleData || !deepTalk) {
-      Alert.alert('Empty Answer', 'Please write your answer before saving');
-      return;
-    }
+    if (!coupleData || !deepTalk || !myAnswer.trim()) return;
 
     setIsSaving(true);
 
     try {
       const today = new Date().toISOString().split('T')[0];
-      const deepTalkRef = doc(db, 'deepTalks', coupleData.coupleCode, today);
+      const deepTalkRef = doc(db, 'deepTalks', coupleData.coupleCode, 'items', today);
 
       const updatedResponses = {
         ...deepTalk.responses,
@@ -142,6 +198,13 @@ export default function DeepTalkScreen() {
           answer: myAnswer.trim(),
           timestamp: serverTimestamp(),
         }
+      };
+      const updatedResponsesForState = {
+        ...deepTalk.responses,
+        [coupleData.nickname]: {
+          answer: myAnswer.trim(),
+          timestamp: Timestamp.now(),
+        },
       };
 
       // Check if both partners have answered
@@ -154,7 +217,7 @@ export default function DeepTalkScreen() {
 
       setDeepTalk(prev => prev ? {
         ...prev,
-        responses: updatedResponses,
+        responses: updatedResponsesForState,
         unlocked: bothAnswered,
       } : null);
 
@@ -180,7 +243,9 @@ export default function DeepTalkScreen() {
   };
 
   const hasAnswered = deepTalk?.responses[coupleData?.nickname || ''];
-  const partnerHasAnswered = deepTalk?.responses[partnerNickname];
+  const partnerResolvedKey = Object.keys(deepTalk?.responses || {}).find(name => name !== coupleData?.nickname);
+  const partnerHasAnswered = !!partnerResolvedKey || !!deepTalk?.responses[partnerNickname];
+  const finalPartnerName = partnerResolvedKey || partnerNickname || 'Partner';
   const isUnlocked = deepTalk?.unlocked;
 
   return (
@@ -204,7 +269,7 @@ export default function DeepTalkScreen() {
 
         <KeyboardAvoidingView
           style={styles.content}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
           <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
             <Animated.View 
@@ -251,7 +316,7 @@ export default function DeepTalkScreen() {
                 </View>
                 
                 <View style={styles.statusItem}>
-                  <Text style={styles.statusLabel}>{partnerNickname || 'Partner'}</Text>
+                  <Text style={styles.statusLabel}>{finalPartnerName}</Text>
                   <View style={[styles.statusIndicator, partnerHasAnswered && styles.statusComplete]}>
                     {partnerHasAnswered ? (
                       <Heart size={16} color="#ffffff" />
@@ -333,11 +398,11 @@ export default function DeepTalkScreen() {
               >
                 <View style={styles.partnerHeader}>
                   <Heart size={20} color="#fd79a8" />
-                  <Text style={styles.partnerTitle}>{partnerNickname}'s Answer</Text>
+                  <Text style={styles.partnerTitle}>{finalPartnerName}'s Answer</Text>
                 </View>
                 <View style={styles.partnerCard}>
                   <Text style={styles.partnerAnswer}>
-                    {deepTalk?.responses[partnerNickname]?.answer}
+                    {partnerResolvedKey ? deepTalk?.responses[partnerResolvedKey]?.answer : deepTalk?.responses[partnerNickname]?.answer}
                   </Text>
                 </View>
               </Animated.View>

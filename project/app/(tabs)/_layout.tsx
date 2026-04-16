@@ -15,8 +15,25 @@ export default function TabLayout() {
     try {
       const { subscribeToNotifications } = require('@/services/notifications');
       
-      const unsubscribe = subscribeToNotifications(coupleData.coupleCode, (notificationsList: any[]) => {
-        const unreadNotifications = notificationsList.filter((n: any) => !n.read);
+      const unsubscribe = subscribeToNotifications(coupleData.coupleCode, (payload: any) => {
+        const notificationsList = Array.isArray(payload)
+          ? payload
+          : payload
+            ? [payload]
+            : [];
+
+        const unreadNotifications = notificationsList.filter((n: any) => n && !n.read);
+
+        // subscribeToNotifications emits one notification at a time.
+        // When we receive a single unread notification, increment the badge.
+        if (!Array.isArray(payload)) {
+          if (unreadNotifications.length > 0) {
+            setUnreadCount(prev => prev + unreadNotifications.length);
+          }
+          return;
+        }
+
+        // If an array is ever provided, use it as the source of truth.
         setUnreadCount(unreadNotifications.length);
       });
 

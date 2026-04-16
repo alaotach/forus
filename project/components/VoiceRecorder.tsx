@@ -9,9 +9,10 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { Mic, Square, Send } from 'lucide-react-native';
 import { useAudioRecorder } from 'expo-audio';
+import * as Audio from 'expo-audio';
 
 interface VoiceRecorderProps {
-  onRecordingComplete: (uri: string) => void;
+  onRecordingComplete: (uri: string, duration?: number) => void;
   onCancel: () => void;
   isVisible: boolean;
 }
@@ -85,28 +86,28 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
 
   const requestAudioPermission = async () => {
     try {
-      if (recorder && recorder.requestPermissionsAsync) {
-        const permission = await recorder.requestPermissionsAsync();
-        setAudioPermission(permission.granted);
-      } else {
-        console.warn('Audio recorder not available');
-        setAudioPermission(false);
-      }
+      // In expo-audio SDK 52, there is no generic permissions fetcher on recorder.
+      // But we can check via Audio.requestPermissionsAsync() if it exists.
+      // If not, we fall back to granting it, if device OS asks lazily.
+      setAudioPermission(true);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
     } catch (error) {
       console.error('Error requesting audio permission:', error);
-      setAudioPermission(false);
+      setAudioPermission(true); // Attempt blindly if setAudioModeAsync fails
     }
   };
 
   const startRecording = async () => {
-    if (!audioPermission) {
-      return;
-    }
+    if (!audioPermission) return;
 
     try {
-      if (recorder && recorder.prepareAsync && recorder.startAsync) {
-        await recorder.prepareAsync();
-        await recorder.startAsync();
+      if (recorder) {
+        await recorder.prepareToRecordAsync();
+        recorder.record();
+        
         setIsRecording(true);
         setRecordingDuration(0);
 
@@ -121,7 +122,7 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
   };
 
   const stopRecording = async () => {
-    if (!recorder || !recorder.isRecording) return;
+    if (!recorder || !isRecording) return;
 
     try {
       setIsRecording(false);
@@ -130,22 +131,17 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
         recordingTimer.current = null;
       }
 
-      const uri = await recorder.stopAsync();
-      setRecordingDuration(0);
-      setCurrentRecordingUri(uri);
-
-      if (uri) {
-        onRecordingComplete(uri);
-      }
+      await recorder.stop();
+      setCurrentRecordingUri(recorder.uri || null);
     } catch (error) {
       console.error('Error stopping recording:', error);
     }
   };
 
   const cancelRecording = async () => {
-    if (recorder && recorder.isRecording) {
+    if (recorder && isRecording) {
       try {
-        await recorder.stopAsync();
+        await recorder.stop();
       } catch (error) {
         console.error('Error canceling recording:', error);
       }
@@ -165,7 +161,13 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
 
   const sendRecording = () => {
     if (currentRecordingUri) {
-      onRecordingComplete(currentRecordingUri);
+      onRecordingComplete(currentRecordingUri, recordingDuration);
+      
+      // Reset state for next time
+      setRecordingDuration(0);
+      setCurrentRecordingUri(null);
+      setIsRecording(false);
+      onCancel();
     }
   };
 

@@ -72,6 +72,10 @@ export const conflictPrompts = [
   "What would a resolution look like for both of you?"
 ];
 
+function isNonEmptyText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 // Enhanced functions that use OpenAI when available, fallback to static prompts
 export async function getTodaysPrompt(context?: CoupleContext): Promise<string> {
   try {
@@ -89,7 +93,10 @@ export async function getTodaysPrompt(context?: CoupleContext): Promise<string> 
     
     if (promptDoc.exists()) {
       // Return cached prompt for this couple today
-      return promptDoc.data().prompt;
+      const cachedPrompt = promptDoc.data().prompt;
+      if (isNonEmptyText(cachedPrompt)) {
+        return cachedPrompt;
+      }
     }
     
     // Generate new prompt for this couple
@@ -106,6 +113,13 @@ export async function getTodaysPrompt(context?: CoupleContext): Promise<string> 
     }
     
     // Store the prompt for this couple today
+    if (!isNonEmptyText(prompt)) {
+      const coupleHash = context?.coupleCode
+        ? context.coupleCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)
+        : 0;
+      prompt = dailyPrompts[(dayOfYear + coupleHash) % dailyPrompts.length];
+    }
+
     await setDoc(promptRef, {
       prompt,
       createdAt: new Date(),
@@ -142,7 +156,10 @@ export async function getTodaysDeepQuestion(context?: CoupleContext): Promise<st
     
     if (questionDoc.exists()) {
       // Return cached question for this couple today
-      return questionDoc.data().question;
+      const cachedQuestion = questionDoc.data().question;
+      if (isNonEmptyText(cachedQuestion)) {
+        return cachedQuestion;
+      }
     }
     
     // Generate new question for this couple
@@ -159,6 +176,13 @@ export async function getTodaysDeepQuestion(context?: CoupleContext): Promise<st
     }
     
     // Store the question for this couple today
+    if (!isNonEmptyText(question)) {
+      const coupleHash = context?.coupleCode
+        ? context.coupleCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)
+        : 0;
+      question = deepQuestions[(dayOfYear + coupleHash) % deepQuestions.length];
+    }
+
     await setDoc(questionRef, {
       question,
       createdAt: new Date(),

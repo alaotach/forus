@@ -16,7 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Save, Heart, Sparkles } from 'lucide-react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useCouple } from '@/hooks/useCouple';
-import { doc, setDoc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, serverTimestamp, updateDoc, collection, query, where, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { getTodaysPrompt } from '@/services/prompts';
 
@@ -29,6 +29,7 @@ export default function ParagraphScreen() {
   const [mood, setMood] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [partnerNickname, setPartnerNickname] = useState<string>('your partner');
   const [partnerParagraph, setPartnerParagraph] = useState<any>(null);
   const [isLoadingPrompt, setIsLoadingPrompt] = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -47,8 +48,15 @@ export default function ParagraphScreen() {
   ];
 
   useEffect(() => {
+    if (!coupleData) return;
     loadParagraph();
-    loadPartnerParagraph();
+    let unsubscribePartner: (() => void) | undefined;
+
+    loadPartnerParagraph().then(unsub => {
+      if (unsub && typeof unsub === 'function') {
+        unsubscribePartner = unsub;
+      }
+    });
 
     // Animate in
     Animated.parallel([
@@ -63,68 +71,74 @@ export default function ParagraphScreen() {
         useNativeDriver: true,
       }),
     ]).start();
-  }, [targetDate]);
+
+    return () => {
+      if (unsubscribePartner) {
+        unsubscribePartner();
+      }
+    };
+  }, [targetDate, coupleData?.coupleCode, coupleData?.nickname]);
 
   const loadParagraph = async () => {
     if (!coupleData) return;
 
     try {
-      const paragraphRef = doc(db, 'dailyParagraphs', `${coupleData.coupleCode}_${targetDate}_${coupleData.nickname}`);
-      const paragraphDoc = await getDoc(paragraphRef);
+      const paragraphsRef = collection(db, 'dailyParagraphs');
+      const paragraphQuery = query(
+        paragraphsRef,
+        where('coupleCode', '==', coupleData.coupleCode),
+        where('nickname', '==', coupleData.nickname),
+        where('date', '==', targetDate)
+      );
+      const paragraphSnapshot = await getDocs(paragraphQuery);
 
-      if (paragraphDoc.exists()) {
-        const data = paragraphDoc.data();
+      const resolvePrompt = async () => {
+        const coupleRef = doc(db, 'couples', coupleData.coupleCode);
+        const coupleDoc = await getDoc(coupleRef);
+        let partnerNickname = '';
+        if (coupleDoc.exists()) {
+          const users = coupleDoc.data().users || {};
+          partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname) || '';
+        }
+        const generated = await getTodaysPrompt({
+          nickname: coupleData.nickname,
+          partnerNickname,
+          coupleCode: coupleData.coupleCode,
+        });
+        const cleaned = generated?.trim();
+        if (!cleaned) {
+          throw new Error('Prompt generation returned empty');
+        }
+        return cleaned;
+      };
+
+      if (!paragraphSnapshot.empty) {
+        const data = paragraphSnapshot.docs[0].data();
+        const existingDocId = paragraphSnapshot.docs[0].id;
         setContent(data.content || '');
-        setPrompt(data.prompt || '');
+        const existingPrompt = typeof data.prompt === 'string' ? data.prompt.trim() : '';
+        if (existingPrompt) {
+          setPrompt(existingPrompt);
+        } else {
+          const repairedPrompt = await resolvePrompt();
+          setPrompt(repairedPrompt);
+          await updateDoc(doc(db, 'dailyParagraphs', existingDocId), {
+            prompt: repairedPrompt,
+          });
+        }
         setMood(data.mood || '');
         setIsEditing(true);
       } else {
         setIsLoadingPrompt(true);
-        
-        // Check if prompt is already cached for today
-        const promptCacheId = `${coupleData.coupleCode}_${targetDate}`;
-        const promptCacheRef = doc(db, 'promptCache', promptCacheId);
-        const promptCacheDoc = await getDoc(promptCacheRef);
-        
-        let generatedPrompt = '';
-        if (promptCacheDoc.exists()) {
-          // Use cached prompt
-          generatedPrompt = promptCacheDoc.data().prompt || '';
-          console.log('Using cached prompt');
-        } else {
-          // Generate new prompt
-          const coupleRef = doc(db, 'couples', coupleData.coupleCode);
-          const coupleDoc = await getDoc(coupleRef);
-          let partnerNickname = '';
-          
-          if (coupleDoc.exists()) {
-            const users = coupleDoc.data().users || {};
-            partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname) || '';
-          }
-
-          generatedPrompt = await getTodaysPrompt({
-            nickname: coupleData.nickname,
-            partnerNickname,
-          });
-          
-          // Cache the prompt for future use
-          try {
-            await setDoc(promptCacheRef, {
-              prompt: generatedPrompt,
-              createdAt: serverTimestamp(),
-            });
-            console.log('Prompt cached successfully');
-          } catch (cacheError) {
-            console.error('Error caching prompt:', cacheError);
-          }
-        }
-        
+        const generatedPrompt = await resolvePrompt();
         setPrompt(generatedPrompt);
         setIsLoadingPrompt(false);
         setIsEditing(false);
       }
     } catch (error) {
       console.error('Error loading paragraph:', error);
+      setPrompt('');
+      Alert.alert('Prompt unavailable', 'Could not load today\'s prompt. Please try again.');
       setIsLoadingPrompt(false);
     }
   };
@@ -138,20 +152,34 @@ export default function ParagraphScreen() {
       
       if (coupleDoc.exists()) {
         const users = coupleDoc.data().users || {};
-        const partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname);
-        
-        if (partnerNickname) {
-          const partnerRef = doc(db, 'dailyParagraphs', `${coupleData.coupleCode}_${targetDate}_${partnerNickname}`);
-          const partnerDoc = await getDoc(partnerRef);
-          
-          if (partnerDoc.exists()) {
-            setPartnerParagraph({
-              nickname: partnerNickname,
-              ...partnerDoc.data()
-            });
-          }
+        const partnerNicknameFound = Object.keys(users).find(name => name !== coupleData.nickname);
+        if (partnerNicknameFound) {
+          setPartnerNickname(partnerNicknameFound);
         }
       }
+
+      const paragraphsRef = collection(db, 'dailyParagraphs');
+      const partnerQuery = query(
+        paragraphsRef,
+        where('coupleCode', '==', coupleData.coupleCode),
+        where('date', '==', targetDate)
+      );
+
+      return onSnapshot(partnerQuery, (snapshot) => {
+        const partnerDoc = snapshot.docs.find(d => d.data().nickname !== coupleData.nickname);
+        if (partnerDoc) {
+          const data = partnerDoc.data();
+          if (data.nickname) {
+            setPartnerNickname(data.nickname);
+          }
+          setPartnerParagraph({
+            id: partnerDoc.id,
+            ...data
+          });
+        } else {
+          setPartnerParagraph(null);
+        }
+      });
     } catch (error) {
       console.error('Error loading partner paragraph:', error);
     }
@@ -179,6 +207,7 @@ export default function ParagraphScreen() {
         prompt,
         mood,
         wordCount,
+        coupleCode: coupleData.coupleCode,
         nickname: coupleData.nickname,
         date: targetDate,
         timestamp: serverTimestamp(),
@@ -219,16 +248,13 @@ export default function ParagraphScreen() {
         // Send notification to partner
         try {
           const { notifyDailyParagraph } = await import('@/services/notifications');
-          const coupleRef = doc(db, 'couples', coupleData.coupleCode);
-          const coupleDoc = await getDoc(coupleRef);
-          const partnerNickname = Object.keys(coupleDoc.data()?.users || {}).find(
-            name => name !== coupleData.nickname
-          );
-          await notifyDailyParagraph(coupleData.coupleCode, partnerNickname || 'your partner');
+          await notifyDailyParagraph(coupleData.coupleCode, partnerNickname);
         } catch (error) {
           console.log('Notification error:', error);
         }
       }
+
+      setIsEditing(true);
 
       Alert.alert('Saved!', 'Your paragraph has been saved 💕', [
         { text: 'OK', onPress: () => router.back() }
@@ -351,35 +377,46 @@ export default function ParagraphScreen() {
               </View>
             </Animated.View>
 
-            {partnerParagraph && (
-              <Animated.View 
-                style={[
-                  styles.partnerSection,
-                  {
-                    opacity: fadeAnim,
-                    transform: [{ translateY: slideAnim }],
-                  },
-                ]}
-              >
-                <View style={styles.partnerHeader}>
-                  <Heart size={20} color="#fd79a8" />
-                  <Text style={styles.partnerTitle}>{partnerParagraph.nickname}'s Writing</Text>
+            <Animated.View 
+              style={[
+                styles.partnerSection,
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+            >
+              <View style={styles.partnerHeader}>
+                <Heart size={20} color="#fd79a8" />
+                <Text style={styles.partnerTitle}>{partnerNickname}'s Writing</Text>
+              </View>
+              
+              {isEditing || !isToday ? (
+                partnerParagraph ? (
+                  <View style={styles.partnerCard}>
+                    <Text style={styles.partnerMood}>
+                      {partnerParagraph.mood === 'Happy' ? '😊' : 
+                       partnerParagraph.mood === 'Romantic' ? '💕' : 
+                       partnerParagraph.mood === 'Grateful' ? '🙏' : 
+                       partnerParagraph.mood === 'Reflective' ? '🤔' : 
+                       partnerParagraph.mood === 'Nostalgic' ? '🥺' : '💭'} {partnerParagraph.mood}
+                    </Text>
+                    <Text style={styles.partnerContent}>{partnerParagraph.content}</Text>
+                    <Text style={styles.partnerMeta}>
+                      {partnerParagraph.wordCount || 0} words
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.partnerCardWaiting}>
+                    <Text style={styles.partnerContentWaiting}>Waiting for {partnerNickname} to share...</Text>
+                  </View>
+                )
+              ) : (
+                <View style={styles.partnerCardWaiting}>
+                  <Text style={styles.partnerContentWaitingLocked}>Share your writing to unlock {partnerNickname}'s!</Text>
                 </View>
-                <View style={styles.partnerCard}>
-                  <Text style={styles.partnerMood}>
-                    {partnerParagraph.mood === 'Happy' ? '😊' : 
-                     partnerParagraph.mood === 'Romantic' ? '💕' : 
-                     partnerParagraph.mood === 'Grateful' ? '🙏' : 
-                     partnerParagraph.mood === 'Reflective' ? '🤔' : 
-                     partnerParagraph.mood === 'Nostalgic' ? '🥺' : '💭'} {partnerParagraph.mood}
-                  </Text>
-                  <Text style={styles.partnerContent}>{partnerParagraph.content}</Text>
-                  <Text style={styles.partnerMeta}>
-                    {partnerParagraph.wordCount || 0} words
-                  </Text>
-                </View>
-              </Animated.View>
-            )}
+              )}
+            </Animated.View>
           </ScrollView>
 
           <Animated.View 
@@ -602,6 +639,27 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Inter-Regular',
     color: '#999',
+  },
+  partnerCardWaiting: {
+    backgroundColor: '#f8f9fa',
+    borderRadius: 16,
+    padding: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderStyle: 'dashed',
+    borderWidth: 2,
+    borderColor: '#e0e0e0',
+  },
+  partnerContentWaiting: {
+    fontSize: 14,
+    fontFamily: 'Inter-Medium',
+    color: '#999',
+    fontStyle: 'italic',
+  },
+  partnerContentWaitingLocked: {
+    fontSize: 14,
+    fontFamily: 'Inter-Medium',
+    color: '#fd79a8',
   },
   saveSection: {
     padding: 20,

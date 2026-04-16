@@ -3,7 +3,7 @@ import { doc, setDoc, getDoc, collection, query, where, onSnapshot, serverTimest
 import { useNotificationContext } from '@/components/NotificationProvider';
 
 export interface NotificationEvent {
-  type: 'message' | 'paragraph' | 'memory' | 'streak' | 'milestone' | 'echo' | 'goal';
+  type: 'message' | 'paragraph' | 'memory' | 'streak' | 'milestone' | 'echo' | 'goal' | 'mood';
   coupleCode: string;
   title: string;
   body: string;
@@ -40,7 +40,8 @@ export async function sendNotification(
 
 export function subscribeToNotifications(
   coupleCode: string,
-  onNotification: (notification: NotificationEvent) => void
+  onNotification: (notification: NotificationEvent) => void,
+  currentNickname?: string
 ) {
   const notifRef = collection(db, 'notifications', coupleCode, 'events');
   const q = query(notifRef, where('read', '==', false));
@@ -52,7 +53,10 @@ export function subscribeToNotifications(
           id: change.doc.id,
           ...change.doc.data(),
         } as NotificationEvent & { id: string };
-        
+
+        // Skip notifications that this user sent themselves
+        if (currentNickname && notification.from === currentNickname) return;
+
         onNotification(notification);
       }
     });
@@ -169,4 +173,58 @@ export async function notifyPartnerAction(
       partnerName
     );
   }
+}
+
+/**
+ * Notify partner when a user updates their mood
+ */
+export async function notifyMoodChanged(
+  coupleCode: string,
+  partnerName: string,
+  mood: string,
+  moodEmoji: string
+) {
+  await sendNotification(
+    coupleCode,
+    'mood',
+    `${moodEmoji} ${partnerName}'s mood`,
+    `${partnerName} is feeling ${mood} right now 💕`,
+    partnerName
+  );
+}
+
+/**
+ * Notify both partners about an upcoming milestone
+ * daysUntil: 0 = today, 1 = tomorrow, 3 = 3 days away, 7 = 1 week away
+ */
+export async function notifyMilestoneReminder(
+  coupleCode: string,
+  milestoneTitle: string,
+  milestoneType: 'anniversary' | 'birthday' | 'special' | 'goal',
+  daysUntil: number
+) {
+  const typeEmoji: Record<string, string> = {
+    anniversary: '💕',
+    birthday: '🎂',
+    goal: '🎯',
+    special: '✨',
+  };
+
+  const emoji = typeEmoji[milestoneType] || '✨';
+
+  let title: string;
+  let body: string;
+
+  if (daysUntil === 0) {
+    title = `${emoji} Today is ${milestoneTitle}!`;
+    body = `Today is your special day — make it memorable! 🎉`;
+  } else if (daysUntil === 1) {
+    title = `${emoji} ${milestoneTitle} is tomorrow!`;
+    body = `Don't forget — ${milestoneTitle} is just 1 day away 💫`;
+  } else {
+    title = `${emoji} ${milestoneTitle} coming up!`;
+    body = `${milestoneTitle} is ${daysUntil} days away — start planning something special 💝`;
+  }
+
+  await sendNotification(coupleCode, 'milestone', title, body, 'System');
 }

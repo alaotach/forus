@@ -27,6 +27,10 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '@/services/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';        
+import { notifyMilestoneReminder } from '@/services/notifications';
+import { Platform } from 'react-native';
+import DateTimePicker from '@/components/DateTimePicker';
 
 interface Milestone {
   id: string;
@@ -47,6 +51,8 @@ export default function MilestonesScreen() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [date, setDate] = useState('');
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [description, setDescription] = useState('');
   const [type, setType] = useState<'anniversary' | 'birthday' | 'special' | 'goal'>('anniversary');
   const [isSaving, setIsSaving] = useState(false);
@@ -88,6 +94,7 @@ export default function MilestonesScreen() {
       });
 
       setMilestones(milestonesData);
+      checkMilestoneReminders(milestonesData, coupleData!.coupleCode);
     });
 
     Animated.parallel([
@@ -105,6 +112,27 @@ export default function MilestonesScreen() {
 
     return () => unsubscribe();
   }, [isConnected, isLoading, coupleData]);
+
+  const checkMilestoneReminders = async (items: Milestone[], coupleCode: string) => {
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const NOTIFY_THRESHOLDS = [0, 1, 3, 7];
+
+    for (const m of items) {
+      if (!NOTIFY_THRESHOLDS.includes(m.daysUntil ?? -1)) continue;
+
+      // Dedupe key: only fire once per milestone per day per threshold
+      const dedupeKey = `milestone_notified_${m.id}_${m.daysUntil}_${today}`;
+      try {
+        const already = await AsyncStorage.getItem(dedupeKey);
+        if (already) continue;
+
+        await notifyMilestoneReminder(coupleCode, m.title, m.type, m.daysUntil!);
+        await AsyncStorage.setItem(dedupeKey, '1');
+      } catch (err) {
+        console.warn('Milestone reminder error:', err);
+      }
+    }
+  };
 
   const handleSave = async () => {
     if (!title.trim() || !date || !coupleData) {
@@ -170,9 +198,40 @@ export default function MilestonesScreen() {
   const resetForm = () => {
     setTitle('');
     setDate('');
+    setSelectedDate(new Date());
     setDescription('');
     setType('anniversary');
     setEditingId(null);
+  };
+
+  const formatDateForStorage = (value: Date) => {
+    const year = value.getFullYear();
+    const month = `${value.getMonth() + 1}`.padStart(2, '0');
+    const day = `${value.getDate()}`.padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const formatDateForDisplay = (value: string) => {
+    if (!value) return 'Pick a date';
+    const parsed = new Date(`${value}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+  };
+
+  const handleDateChange = (event: any, pickedDate?: Date) => {
+    if (event.type === 'dismissed') {
+      setShowDatePicker(false);
+      return;
+    }
+
+    const nextDate = pickedDate || selectedDate;
+    setShowDatePicker(false);
+    setSelectedDate(nextDate);
+    setDate(formatDateForStorage(nextDate));
   };
 
   const getTypeEmoji = (type: string) => {
@@ -285,6 +344,8 @@ export default function MilestonesScreen() {
                           onPress={() => {
                             setTitle(milestone.title);
                             setDate(milestone.date);
+                            const parsedDate = new Date(`${milestone.date}T00:00:00`);
+                            setSelectedDate(Number.isNaN(parsedDate.getTime()) ? new Date() : parsedDate);
                             setDescription(milestone.description || '');
                             setType(milestone.type);
                             setEditingId(milestone.id);
@@ -320,13 +381,24 @@ export default function MilestonesScreen() {
                 style={styles.input}
               />
 
-              <TextInput
-                placeholder="Date (YYYY-MM-DD)"
-                placeholderTextColor="#999"
-                value={date}
-                onChangeText={setDate}
-                style={styles.input}
-              />
+              <TouchableOpacity
+                style={styles.datePickerButton}
+                onPress={() => setShowDatePicker(true)}
+                activeOpacity={0.8}
+              >
+                <Calendar size={16} color="#667eea" />
+                <Text style={[styles.datePickerText, !date && styles.datePickerPlaceholder]}>
+                  {formatDateForDisplay(date)}
+                </Text>
+              </TouchableOpacity>
+              {showDatePicker && (
+                <DateTimePicker
+                  value={selectedDate}
+                  mode="date"
+                  display="default"
+                  onChange={handleDateChange}
+                />
+              )}
 
               <TextInput
                 placeholder="Description (optional)"
@@ -522,6 +594,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: 'Inter-Regular',
     color: '#333',
+  },
+  datePickerButton: {
+    backgroundColor: '#f5f5f5',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  datePickerText: {
+    fontSize: 14,
+    fontFamily: 'Inter-Regular',
+    color: '#333',
+  },
+  datePickerPlaceholder: {
+    color: '#999',
   },
   textArea: {
     minHeight: 80,

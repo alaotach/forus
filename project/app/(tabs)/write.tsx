@@ -113,15 +113,20 @@ export default function WriteScreen() {
           id: doc.id,
           ...doc.data()
         } as DailyParagraph);
+        setTodaysPrompt('');
       } else {
         setTodaysParagraph(null);
         try {
           const prompt = await getTodaysPrompt({
             nickname: coupleData.nickname,
+            partnerNickname: coupleData.partnerNickname,
+            coupleCode: coupleData.coupleCode
           });
-          setTodaysPrompt(prompt);
+          const cleaned = prompt?.trim() || '';
+          setTodaysPrompt(cleaned);
         } catch (error) {
           console.error('Error loading prompt:', error);
+          setTodaysPrompt('');
         }
       }
     });

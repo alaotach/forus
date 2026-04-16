@@ -5,8 +5,16 @@ export default function AuthLayout() {
     <Stack
       screenOptions={{
         headerShown: false,
-        animationEnabled: true,
+        animation: 'default',
       }}
-    />
+    >
+      <Stack.Screen name="auth" />
+      <Stack.Screen name="couple-check" />
+      <Stack.Screen name="couple-code" />
+      <Stack.Screen name="couple-options" />
+      <Stack.Screen name="join-couple" />
+      <Stack.Screen name="nickname" />
+      <Stack.Screen name="waiting-for-partner" />
+    </Stack>
   );
 }

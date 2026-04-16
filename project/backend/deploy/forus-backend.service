@@ -1,0 +1,24 @@
+[Unit]
+Description=ForUs Backend API
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/forus/backend
+EnvironmentFile=/opt/forus/backend/.env
+ExecStart=/usr/bin/node /opt/forus/backend/server.js
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/forus/backend
+
+[Install]
+WantedBy=multi-user.target

@@ -126,8 +126,7 @@ export default function EchoScreen() {
 
       setCoupleContext({
         nickname: coupleData.nickname,
-        partnerNickname,
-        recentMessages: recentMessages.slice(0, 5),
+        partnerNickname,        coupleCode: coupleData.coupleCode,        recentMessages: recentMessages.slice(0, 5),
         recentParagraphs: recentParagraphs.slice(0, 3),
       });
     } catch (error) {

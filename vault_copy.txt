@@ -15,10 +15,10 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Archive, Plus, FileText, Image as ImageIcon, Mic, Heart, Star, X, Send, MoreVertical, Edit2, Trash2 } from 'lucide-react-native';
-import { useRouter } from 'expo-router';
+import { Archive, Plus, FileText, Image as ImageIcon, Mic, Heart, Star, X, Send } from 'lucide-react-native';
 import { useCouple } from '@/hooks/useCouple';
-import { collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { useRouter } from 'expo-router';
+import { collection, query, orderBy, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { VaultItem } from '@/types/app';
 import * as ImagePicker from 'expo-image-picker';
@@ -26,7 +26,6 @@ import { useAudioRecorder, useAudioPlayer } from 'expo-audio';
 import AudioPlayer from '@/components/AudioPlayer';
 import { checkStorageQuota } from '@/services/storage';
 import { uploadPhotoToCloudinary, uploadAudioToCloudinary } from '@/services/cloudinary';
-import { getSignedMediaUrl, deleteMediaById } from '@/services/media';
 import * as Audio from 'expo-audio';
 
 export default function VaultScreen() {
@@ -44,10 +43,6 @@ export default function VaultScreen() {
   const [isUploadingLetter, setIsUploadingLetter] = useState(false);
   
   const [showAudioModal, setShowAudioModal] = useState(false);
-  const [selectedVaultItem, setSelectedVaultItem] = useState<VaultItem | null>(null);
-  const [optionsModalVisible, setOptionsModalVisible] = useState(false);
-  const [editNameModalVisible, setEditNameModalVisible] = useState(false);
-  const [newItemName, setNewItemName] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
@@ -111,32 +106,13 @@ export default function VaultScreen() {
     const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
     const q = query(vaultRef, orderBy('timestamp', 'desc'));
 
-    const unsubscribe = onSnapshot(q, async (snapshot) => {
-      const rawItems = snapshot.docs.map(doc => ({
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const items = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
       })) as VaultItem[];
-
-      const hydratedItems = await Promise.all(
-        rawItems.map(async (item) => {
-          if (item.media?.mediaId && coupleData?.coupleCode && coupleData?.nickname) {
-            try {
-              const signedUrl = await getSignedMediaUrl(
-                item.media.mediaId,
-                coupleData.coupleCode,
-                coupleData.nickname
-              );
-              return { ...item, url: signedUrl };
-            } catch {
-              return item;
-            }
-          }
-
-          return item;
-        })
-      );
-
-      setVaultItems(hydratedItems);
+      
+      setVaultItems(items);
     });
 
     // Animate in
@@ -224,17 +200,14 @@ export default function VaultScreen() {
     if (!coupleData) return;
     
     try {
-      const media = await uploadPhotoToCloudinary(uri, {
-        userId: coupleData.nickname,
-        coupleCode: coupleData.coupleCode,
-      });
+      const photoUrl = await uploadPhotoToCloudinary(uri);
 
       const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
       await addDoc(vaultRef, {
         type: 'photo',
         title: `Photo from ${new Date().toLocaleDateString()}`,
         author: coupleData.nickname,
-        media,
+        url: photoUrl,
         timestamp: serverTimestamp(),
         favorite: false,
         tags: ['memory'],
@@ -355,17 +328,14 @@ export default function VaultScreen() {
     }
 
     try {
-      const media = await uploadAudioToCloudinary(currentRecordingUri, {
-        userId: coupleData.nickname,
-        coupleCode: coupleData.coupleCode,
-      });
+      const audioUrl = await uploadAudioToCloudinary(currentRecordingUri);
 
       const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
       await addDoc(vaultRef, {
         type: 'audio',
         title: `Voice memo from ${new Date().toLocaleDateString()}`,
         author: coupleData.nickname,
-        media,
+        url: audioUrl,
         duration: recordingDuration,
         timestamp: serverTimestamp(),
         favorite: false,
@@ -394,55 +364,6 @@ export default function VaultScreen() {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const handleUpdateName = async () => {
-    if (!coupleData || !selectedVaultItem || !newItemName.trim()) return;
-    try {
-      const itemRef = doc(db, 'vault', coupleData.coupleCode, 'items', selectedVaultItem.id);
-      await updateDoc(itemRef, { title: newItemName });
-      setEditNameModalVisible(false);
-      setOptionsModalVisible(false);
-      setSelectedVaultItem(null);
-      setNewItemName('');
-    } catch (error) {
-      console.error('Error updating name:', error);
-      Alert.alert('Error', 'Failed to update name');
-    }
-  };
-
-  const handleDeleteItem = async () => {
-    if (!coupleData || !selectedVaultItem) return;
-    Alert.alert(
-      'Delete Entry',
-      'Are you sure you want to delete this memory? This cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Delete', 
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              if (selectedVaultItem.media?.mediaId) {
-                await deleteMediaById(
-                  selectedVaultItem.media.mediaId,
-                  coupleData.coupleCode,
-                  coupleData.nickname
-                );
-              }
-
-              const itemRef = doc(db, 'vault', coupleData.coupleCode, 'items', selectedVaultItem.id);
-              await deleteDoc(itemRef);
-              setOptionsModalVisible(false);
-              setSelectedVaultItem(null);
-            } catch (error) {
-              console.error('Error deleting item:', error);
-              Alert.alert('Error', 'Failed to delete item');
-            }
-          }
-        }
-      ]
-    );
   };
 
   const renderVaultItem = (item: VaultItem, index: number) => (
@@ -476,16 +397,6 @@ export default function VaultScreen() {
             By {item.author} • {item.timestamp?.toDate ? new Date(item.timestamp.toDate()).toLocaleDateString() : 'Just now'}
           </Text>
         </View>
-        <TouchableOpacity 
-          style={{ padding: 4, marginLeft: 8 }}
-          onPress={() => {
-            setSelectedVaultItem(item);
-            setNewItemName(item.title);
-            setOptionsModalVisible(true);
-          }}
-        >
-          <MoreVertical size={20} color="#999" />
-        </TouchableOpacity>
       </View>
       
       {item.type === 'photo' && item.url && (
@@ -781,94 +692,6 @@ export default function VaultScreen() {
             </SafeAreaView>
           </LinearGradient>
         </Modal>
-
-        {/* Options Modal */}
-        <Modal
-          visible={optionsModalVisible}
-          transparent={true}
-          animationType="fade"
-          onRequestClose={() => setOptionsModalVisible(false)}
-        >
-          <View style={styles.optionsModalOverlay}>
-            <View style={styles.optionsModalContent}>
-              <View style={styles.optionsModalHeader}>
-                <Text style={styles.optionsModalTitle}>Memory Options</Text>
-                <TouchableOpacity onPress={() => setOptionsModalVisible(false)}>
-                  <X size={24} color="#666" />
-                </TouchableOpacity>
-              </View>
-              
-              <TouchableOpacity 
-                style={styles.optionItem}
-                onPress={() => {
-                  setOptionsModalVisible(false);
-                  setEditNameModalVisible(true);
-                }}
-              >
-                <View style={[styles.optionIconContainer, { backgroundColor: '#f0f5ff' }]}>
-                  <Edit2 size={20} color="#4834d4" />
-                </View>
-                <View style={styles.optionTextContainer}>
-                  <Text style={styles.optionLabel}>Rename Memory</Text>
-                  <Text style={styles.optionDesc}>Change the title of this entry</Text>
-                </View>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.optionItem}
-                onPress={handleDeleteItem}
-              >
-                <View style={[styles.optionIconContainer, { backgroundColor: '#fff0f0' }]}>
-                  <Trash2 size={20} color="#eb4d4b" />
-                </View>
-                <View style={styles.optionTextContainer}>
-                  <Text style={[styles.optionLabel, { color: '#eb4d4b' }]}>Delete Memory</Text>
-                  <Text style={styles.optionDesc}>This action cannot be undone</Text>
-                </View>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
-
-        {/* Edit Name Modal */}
-        <Modal
-          visible={editNameModalVisible}
-          transparent={true}
-          animationType="fade"
-          onRequestClose={() => setEditNameModalVisible(false)}
-        >
-          <KeyboardAvoidingView 
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.optionsModalOverlay}
-          >
-            <View style={[styles.optionsModalContent, { paddingBottom: 20 }]}>
-              <Text style={styles.optionsModalTitle}>Rename Memory</Text>
-              <TextInput
-                style={styles.renameInput}
-                value={newItemName}
-                onChangeText={setNewItemName}
-                placeholder="Enter new name"
-                autoFocus
-                selectionColor="#fd79a8"
-              />
-              <View style={styles.renameButtons}>
-                <TouchableOpacity 
-                  style={styles.renameCancelBtn}
-                  onPress={() => setEditNameModalVisible(false)}
-                >
-                  <Text style={styles.renameCancelTxt}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity 
-                  style={styles.renameSaveBtn}
-                  onPress={handleUpdateName}
-                >
-                  <Text style={styles.renameSaveTxt}>Save</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </KeyboardAvoidingView>
-        </Modal>
-
         </View>
       </SafeAreaView>
     </LinearGradient>
@@ -1223,91 +1046,5 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     marginLeft: 12,
   },
-  optionsModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
-  },
-  optionsModalContent: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 24,
-    paddingBottom: 40,
-  },
-  optionsModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  optionsModalTitle: {
-    fontSize: 18,
-    fontFamily: 'Inter-Bold',
-    color: '#333',
-    marginBottom: 10,
-  },
-  optionItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  optionIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  optionTextContainer: {
-    flex: 1,
-  },
-  optionLabel: {
-    fontSize: 16,
-    fontFamily: 'Inter-SemiBold',
-    color: '#333',
-    marginBottom: 4,
-  },
-  optionDesc: {
-    fontSize: 12,
-    fontFamily: 'Inter-Regular',
-    color: '#888',
-  },
-  renameInput: {
-    backgroundColor: '#f5f6fa',
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 16,
-    fontFamily: 'Inter-Medium',
-    color: '#333',
-    marginBottom: 24,
-  },
-  renameButtons: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-  },
-  renameCancelBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    marginRight: 12,
-  },
-  renameCancelTxt: {
-    color: '#666',
-    fontSize: 16,
-    fontFamily: 'Inter-SemiBold',
-  },
-  renameSaveBtn: {
-    backgroundColor: '#fd79a8',
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-  },
-  renameSaveTxt: {
-    color: '#fff',
-    fontSize: 16,
-    fontFamily: 'Inter-SemiBold',
-  },
 });
+

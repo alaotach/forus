@@ -15,7 +15,7 @@ import { Flame, PenTool, MessageCircle, Users, Calendar, Heart, Sparkles } from 
 import { useCouple } from '@/hooks/useCouple';
 import { useRouter } from 'expo-router';
 import { usePushNotifications } from '@/hooks/usePushNotifications';
-import { doc, getDoc, getDocs, setDoc, updateDoc, serverTimestamp, collection, query, where } from 'firebase/firestore';
+import { doc, getDoc, getDocs, setDoc, updateDoc, serverTimestamp, collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { getTodaysPrompt } from '@/services/prompts';
 import { checkAndDeleteExpiredFreeItems, checkAndDowngradeExpiredSubscription } from '@/services/subscriptions';
@@ -30,6 +30,20 @@ interface StreakData {
   longestAppStreak: number;
   longestParagraphStreak: number;
 }
+
+const MOOD_OPTIONS = [
+  { label: 'Happy', emoji: '😊' },
+  { label: 'Romantic', emoji: '💕' },
+  { label: 'Grateful', emoji: '🙏' },
+  { label: 'Reflective', emoji: '🤔' },
+  { label: 'Nostalgic', emoji: '🥺' },
+  { label: 'Thoughtful', emoji: '💭' },
+];
+
+const getMoodEmoji = (mood: string) => {
+  const found = MOOD_OPTIONS.find(option => option.label === mood);
+  return found?.emoji || '😐';
+};
 
 export default function HomeScreen() {
   const { coupleData, isConnected, isLoading } = useCouple();
@@ -53,6 +67,10 @@ export default function HomeScreen() {
   const [dailyPrompt, setDailyPrompt] = useState('');
   const [isLoadingPrompt, setIsLoadingPrompt] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([]);
+  const [myMood, setMyMood] = useState('Neutral');
+  const [partnerMood, setPartnerMood] = useState('Neutral');
+  const [partnerNickname, setPartnerNickname] = useState('Partner');
+  const [isSavingMood, setIsSavingMood] = useState(false);
 
   useEffect(() => {
     mounted.current = true;
@@ -73,6 +91,8 @@ export default function HomeScreen() {
 
     updateAppStreak();
     loadTodaysParagraph();
+    loadPartnerNickname();
+    const unsubscribeMood = subscribeToTodaysMoods();
     
     // Cleanup expired vault items for free plan users
     if (coupleData) {
@@ -104,9 +124,85 @@ export default function HomeScreen() {
     ]).start();
 
     return () => {
+      if (unsubscribeMood) unsubscribeMood();
       mounted.current = false;
     };
   }, [isConnected, isLoading, coupleData]);
+
+  const loadPartnerNickname = async () => {
+    if (!coupleData || !mounted.current) return;
+    try {
+      const coupleRef = doc(db, 'couples', coupleData.coupleCode);
+      const coupleDoc = await getDoc(coupleRef);
+      if (!coupleDoc.exists() || !mounted.current) return;
+      const users = coupleDoc.data().users || {};
+      const partner = Object.keys(users).find(name => name !== coupleData.nickname);
+      if (partner) {
+        setPartnerNickname(partner);
+      }
+    } catch (error) {
+      console.error('Error loading partner nickname:', error);
+    }
+  };
+
+  const subscribeToTodaysMoods = () => {
+    if (!coupleData || !mounted.current) return;
+    const today = new Date().toISOString().split('T')[0];
+    const moodRef = collection(db, 'couples', coupleData.coupleCode, 'moodChecks');
+
+    return onSnapshot(moodRef, (snapshot) => {
+      if (!mounted.current) return;
+      const todaysMoods = snapshot.docs
+        .map((item) => ({ id: item.id, ...item.data() } as any))
+        .filter((item) => item.date === today || item.timestamp?.toDate?.().toISOString?.().split('T')[0] === today);
+
+      const myEntry = todaysMoods.find((item) => item.user === coupleData.nickname);
+      const partnerEntry = todaysMoods.find((item) => item.user !== coupleData.nickname);
+
+      setMyMood(myEntry?.mood || 'Neutral');
+      setPartnerMood(partnerEntry?.mood || 'Neutral');
+      if (partnerEntry?.user) {
+        setPartnerNickname(partnerEntry.user);
+      }
+    });
+  };
+
+  const saveMood = async (mood: string) => {
+    if (!coupleData || isSavingMood) return;
+
+    const previousMood = myMood;
+    const today = new Date().toISOString().split('T')[0];
+    const moodId = `${today}_${coupleData.nickname}`;
+    setMyMood(mood);
+
+    try {
+      setIsSavingMood(true);
+      const moodRef = doc(db, 'couples', coupleData.coupleCode, 'moodChecks', moodId);
+      await setDoc(moodRef, {
+        mood,
+        user: coupleData.nickname,
+        date: today,
+        timestamp: serverTimestamp(),
+      });
+
+      // Notify partner if mood changed (skip if same mood re-selected)
+      if (mood !== previousMood) {
+        const moodEmoji = getMoodEmoji(mood);
+        const { notifyMoodChanged } = await import('@/services/notifications');
+        notifyMoodChanged(
+          coupleData.coupleCode,
+          coupleData.nickname,
+          mood,
+          moodEmoji
+        ).catch(err => console.warn('Mood notification failed:', err));
+      }
+    } catch (error) {
+      console.error('Error saving mood:', error);
+      setMyMood(previousMood);
+    } finally {
+      setIsSavingMood(false);
+    }
+  };
 
   const updateAppStreak = async () => {
     if (!coupleData || !mounted.current) return;
@@ -126,69 +222,95 @@ export default function HomeScreen() {
       const userLogins = (coupleDoc.data()?.logins || {}) as { [key: string]: string };
       userLogins[coupleData.nickname] = today;
 
+      // Actually save the login unconditionally so partner's login is recorded
+      await setDoc(coupleRef, { logins: userLogins }, { merge: true });
+
       // Check if both users logged in today. Since a couple has exactly 2 members,
       // we check if we have 2 distinct nicknames logged in today.
-      const allUsersLoggedInToday = Object.keys(userLogins).length === 2 && 
+      const allUsersLoggedInToday = Object.keys(userLogins).length === 2 &&
         Object.values(userLogins).every(loginDate => loginDate === today);
 
       if (streakDoc.exists()) {
         const data = streakDoc.data() as StreakData;
         const lastOpen = data.lastAppOpen;
-        
+
         let newAppStreak = data.appStreak;
+        let longestAppStreak = data.longestAppStreak || 0;
         let shouldIncreaseStreak = false;
+        let needsDbUpdate = false;
+        let newLastAppOpen = lastOpen;
 
-        if (lastOpen !== today) {
-          const yesterday = new Date();
-          yesterday.setDate(yesterday.getDate() - 1);
-          
-          // Only increase streak if both users logged in yesterday and both logged in today
-          if (lastOpen === yesterday.toDateString() && allUsersLoggedInToday) {
-            newAppStreak += 1;
-            shouldIncreaseStreak = true;
-          } else if (lastOpen !== today) {
-            // Reset streak if someone missed a day
-            newAppStreak = allUsersLoggedInToday ? 1 : 0;
-          }
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toDateString();
 
-          const longestAppStreak = Math.max(data.longestAppStreak || 0, newAppStreak);
-
-          await updateDoc(streakRef, {
-            appStreak: newAppStreak,
-            lastAppOpen: today,
-            longestAppStreak,
-          });
-
-          // Also update couple logins (create document if it doesn't exist)
-          await setDoc(coupleRef, { logins: userLogins }, { merge: true });
-
-          if (mounted.current) {
-            setStreakData({ ...data, appStreak: newAppStreak, lastAppOpen: today, longestAppStreak });
-          }
-
-          // Send streak notification if milestone
-          if (shouldIncreaseStreak && newAppStreak > 0 && newAppStreak % 7 === 0) {
-            const { notifyStreakMilestone } = await import('@/services/notifications');
-            notifyStreakMilestone(coupleData.coupleCode, newAppStreak, 'app');
-          }
-        } else {
+        if (lastOpen === today) {
+          // Already successfully checked and updated today by both users
           if (mounted.current) {
             setStreakData(data);
+          }
+        } else {
+          // Both users logged in today, time to advance or reset the streak
+          if (allUsersLoggedInToday) {
+            if (lastOpen === yesterdayStr) {
+               newAppStreak += 1;
+            } else {
+               newAppStreak = 1; // It was broken
+            }
+            shouldIncreaseStreak = true;
+            needsDbUpdate = true;
+            newLastAppOpen = today;
+          } 
+          // Not both logged in today yet. What if it's completely broken from days past?
+          else if (lastOpen !== yesterdayStr && lastOpen !== today) {
+            if (newAppStreak !== 0) {
+               newAppStreak = 0; // Streak is visibly broken
+               needsDbUpdate = true;
+               // DO NOT set newLastAppOpen to today. 
+               // This way when the second person logs in later today, 
+               // they will see allUsersLoggedInToday and start the streak at 1.
+            }
+          }
+
+          if (needsDbUpdate) {
+            longestAppStreak = Math.max(longestAppStreak, newAppStreak);
+            
+            await updateDoc(streakRef, {
+              appStreak: newAppStreak,
+              lastAppOpen: newLastAppOpen,
+              longestAppStreak,
+            });
+
+            if (mounted.current) {
+              setStreakData({ ...data, appStreak: newAppStreak, lastAppOpen: newLastAppOpen, longestAppStreak });
+            }
+
+            // Send streak notification if milestone
+            if (shouldIncreaseStreak && newAppStreak > 0 && newAppStreak % 7 === 0) {
+              try {
+                const { notifyStreakMilestone } = await import('@/services/notifications');
+                notifyStreakMilestone(coupleData.coupleCode, newAppStreak, 'app');
+              } catch (e) { console.log(e); }
+            }
+          } else {
+            if (mounted.current) {
+              setStreakData({ ...data, appStreak: newAppStreak, lastAppOpen: newLastAppOpen });
+            }
           }
         }
       } else {
         // Initial setup - only set streak to 1 if both users are here
         const initialStreak = allUsersLoggedInToday ? 1 : 0;
+        const initialLastOpen = allUsersLoggedInToday ? today : '';
         const initialData = {
           appStreak: initialStreak,
           paragraphStreak: 0,
-          lastAppOpen: today,
+          lastAppOpen: initialLastOpen,
           lastParagraphDate: '',
           longestAppStreak: initialStreak,
           longestParagraphStreak: 0,
         };
         await setDoc(streakRef, initialData);
-        await setDoc(coupleRef, { logins: userLogins }, { merge: true });
         if (mounted.current) {
           setStreakData(initialData);
         }
@@ -236,16 +358,18 @@ export default function HomeScreen() {
         const prompt = await getTodaysPrompt({
           nickname: coupleData.nickname,
           partnerNickname,
+          coupleCode: coupleData.coupleCode,
         });
         
         if (mounted.current) {
-          setDailyPrompt(prompt);
+          setDailyPrompt(prompt?.trim() || '');
           setIsLoadingPrompt(false);
         }
       }
     } catch (error) {
       console.error('Error loading paragraph:', error);
       if (mounted.current) {
+        setDailyPrompt('');
         setIsLoadingPrompt(false);
       }
     }
@@ -265,7 +389,7 @@ export default function HomeScreen() {
           
           console.log('New notification:', notification);
         }
-      });
+      }, coupleData?.nickname);
 
       // Cleanup listener on unmount
       return unsubscribe;
@@ -383,6 +507,46 @@ export default function HomeScreen() {
                 <Text style={styles.actionSubtitle}>Send love messages</Text>
               </LinearGradient>
             </TouchableOpacity>
+          </Animated.View>
+
+          <Animated.View
+            style={[
+              styles.moodCard,
+              {
+                opacity: fadeAnim,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <View style={styles.moodHeader}>
+              <Text style={styles.moodTitle}>Daily Mood Check-In</Text>
+              <Text style={styles.moodSubtitle}>Set yours and see your partner's vibe</Text>
+            </View>
+            <View style={styles.moodStatusRow}>
+              <View style={styles.moodStatusBox}>
+                <Text style={styles.moodStatusLabel}>You</Text>
+                <Text style={styles.moodStatusValue}>{getMoodEmoji(myMood)} {myMood}</Text>
+              </View>
+              <View style={styles.moodStatusBox}>
+                <Text style={styles.moodStatusLabel}>{partnerNickname}</Text>
+                <Text style={styles.moodStatusValue}>{getMoodEmoji(partnerMood)} {partnerMood}</Text>
+              </View>
+            </View>
+            <View style={styles.moodOptionsRow}>
+              {MOOD_OPTIONS.map((option) => (
+                <TouchableOpacity
+                  key={option.label}
+                  style={[
+                    styles.moodOptionChip,
+                    myMood === option.label && styles.moodOptionChipSelected,
+                  ]}
+                  onPress={() => saveMood(option.label)}
+                  disabled={isSavingMood}
+                >
+                  <Text style={styles.moodOptionEmoji}>{option.emoji}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </Animated.View>
 
           {!todaysParagraph && dailyPrompt && (
@@ -609,6 +773,73 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 12,
     elevation: 8,
+  },
+  moodCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  moodHeader: {
+    marginBottom: 12,
+  },
+  moodTitle: {
+    fontSize: 18,
+    fontFamily: 'Inter-Bold',
+    color: '#ff6b9d',
+  },
+  moodSubtitle: {
+    fontSize: 13,
+    fontFamily: 'Inter-Regular',
+    color: '#666',
+    marginTop: 2,
+  },
+  moodStatusRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 12,
+  },
+  moodStatusBox: {
+    flex: 1,
+    backgroundColor: '#fff5fa',
+    borderRadius: 12,
+    padding: 10,
+  },
+  moodStatusLabel: {
+    fontSize: 12,
+    fontFamily: 'Inter-Medium',
+    color: '#777',
+    marginBottom: 4,
+  },
+  moodStatusValue: {
+    fontSize: 14,
+    fontFamily: 'Inter-SemiBold',
+    color: '#333',
+  },
+  moodOptionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  moodOptionChip: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f3f4f6',
+  },
+  moodOptionChipSelected: {
+    backgroundColor: '#ffd9ea',
+    borderWidth: 1,
+    borderColor: '#ff6b9d',
+  },
+  moodOptionEmoji: {
+    fontSize: 20,
   },
   promptHeader: {
     flexDirection: 'row',

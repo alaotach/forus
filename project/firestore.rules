@@ -66,17 +66,46 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Subscriptions Collection
-    match /subscriptions/{subscriptionId} {
-      allow read: if isOwner(resource.data.uid) || hasMatchingCoupleCode(resource.data.coupleCode);
-      allow create: if isOwner(request.resource.data.uid);
-      allow update: if isOwner(resource.data.uid);
+    // Matches any collection where the document ID *is* the coupleCode or the resource.data contains coupleCode
+    // E.g. couples, streaks, coupleSecurity, subscriptions, deepTalks
+    
+    match /dailyPrompts/{id} {
+      allow read, create, update: if isAuthenticated();
+    }
+
+    match /dailyDeepQuestions/{id} {
+      allow read, create, update: if isAuthenticated();
+    }
+
+    match /promptCache/{id} {
+      allow read, create, update: if isAuthenticated();
+    }
+
+    match /sharedDiary/{itemId} {
+      allow read: if hasMatchingCoupleCode(resource.data.coupleCode);
+      allow create: if hasMatchingCoupleCode(request.resource.data.coupleCode);
+      allow update, delete: if hasMatchingCoupleCode(resource.data.coupleCode);
     }
 
     // Push Notifications / FCM Tokens Collection
     match /fcmTokens/{tokenId} {
       allow read: if isAuthenticated();
       allow create, update, delete: if isOwner(request.resource.data.uid);
+    }
+
+    match /{collection}/{coupleCode} {
+      allow read: if hasMatchingCoupleCode(coupleCode) || (resource != null && 'coupleCode' in resource.data && hasMatchingCoupleCode(resource.data.coupleCode));
+      allow create: if hasMatchingCoupleCode(coupleCode) || ('coupleCode' in request.resource.data && hasMatchingCoupleCode(request.resource.data.coupleCode));
+      allow update: if hasMatchingCoupleCode(coupleCode) || (resource != null && 'coupleCode' in resource.data && hasMatchingCoupleCode(resource.data.coupleCode));
+      allow delete: if hasMatchingCoupleCode(coupleCode) || (resource != null && 'coupleCode' in resource.data && hasMatchingCoupleCode(resource.data.coupleCode));
+      
+      // And allow all their subcollections 
+      match /{subCollection}/{document=**} {
+        allow read: if hasMatchingCoupleCode(coupleCode);
+        allow create: if hasMatchingCoupleCode(coupleCode);
+        allow update: if hasMatchingCoupleCode(coupleCode);
+        allow delete: if hasMatchingCoupleCode(coupleCode);
+      }
     }
 
     // Catch-all for unlisted collections

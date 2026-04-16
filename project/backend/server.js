@@ -1,17 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
-const fs = require('fs');
-const path = require('path');
-const multer = require('multer');
 const rateLimit = require('express-rate-limit');
+const mediaRoutes = require('./routes/mediaRoutes');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MEDIA_ROOT = process.env.MEDIA_ROOT || (process.env.NODE_ENV === 'production' ? '/data/forus-media' : path.join(__dirname, 'uploads'));
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
-const UPLOAD_API_TOKEN = process.env.UPLOAD_API_TOKEN || '';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const isProduction = NODE_ENV === 'production';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
@@ -21,22 +17,16 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || `${15 * 60 * 1000}`, 10);
 const RATE_LIMIT_MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '120', 10);
 const AI_RATE_LIMIT_MAX = parseInt(process.env.AI_RATE_LIMIT_MAX || '40', 10);
-const UPLOAD_RATE_LIMIT_MAX = parseInt(process.env.UPLOAD_RATE_LIMIT_MAX || '30', 10);
-const MAX_UPLOAD_SIZE_MB = parseInt(process.env.MAX_UPLOAD_SIZE_MB || '15', 10);
-const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
-const ALLOWED_UPLOAD_MIME_TYPES = new Set([
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'audio/m4a',
-  'audio/mp4',
-  'audio/mpeg',
-  'audio/wav',
-  'audio/x-wav',
-]);
 
 if (isProduction) {
-  const requiredEnvVars = ['HACKCLUB_API_KEY', 'PUBLIC_BASE_URL', 'UPLOAD_API_TOKEN'];
+  const requiredEnvVars = [
+    'HACKCLUB_API_KEY',
+    'PUBLIC_BASE_URL',
+    'MEDIA_AUTH_JWT_SECRET',
+    'AWS_REGION',
+    'AWS_S3_BUCKET',
+    'AWS_MEDIA_TABLE',
+  ];
   const missingEnvVars = requiredEnvVars.filter((name) => !process.env[name]);
   if (missingEnvVars.length > 0) {
     console.error(`Missing required environment variables in production: ${missingEnvVars.join(', ')}`);
@@ -44,7 +34,7 @@ if (isProduction) {
   }
 }
 
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 
 // Enable CORS; in production restrict to ALLOWED_ORIGINS if provided.
 app.use(cors({
@@ -78,71 +68,8 @@ const aiLimiter = rateLimit({
   message: { success: false, error: 'Too many AI requests. Please wait and retry.' },
 });
 
-const uploadLimiter = rateLimit({
-  windowMs: RATE_LIMIT_WINDOW_MS,
-  max: UPLOAD_RATE_LIMIT_MAX,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, error: 'Too many upload attempts. Please try again later.' },
-});
-
 app.use('/api', apiLimiter);
-
-if (!fs.existsSync(MEDIA_ROOT)) {
-  fs.mkdirSync(MEDIA_ROOT, { recursive: true });
-}
-
-for (const dir of ['images', 'audio', 'photos']) {
-  const fullPath = path.join(MEDIA_ROOT, dir);
-  if (!fs.existsSync(fullPath)) {
-    fs.mkdirSync(fullPath, { recursive: true });
-  }
-}
-
-app.use('/media', express.static(MEDIA_ROOT));
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const folder = typeof req.body.folder === 'string' ? req.body.folder : 'uploads';
-    const safeFolder = folder.replace(/[^a-zA-Z0-9_-]/g, '');
-    const targetDir = path.join(MEDIA_ROOT, safeFolder || 'uploads');
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
-    cb(null, targetDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '') || '';
-    const name = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, name);
-  },
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: MAX_UPLOAD_SIZE_BYTES },
-  fileFilter: (req, file, cb) => {
-    if (!ALLOWED_UPLOAD_MIME_TYPES.has(file.mimetype)) {
-      return cb(new Error(`Unsupported media type: ${file.mimetype}`));
-    }
-
-    cb(null, true);
-  },
-});
-
-function requireUploadToken(req, res, next) {
-  // In development, allow local testing when token is not configured.
-  if (!UPLOAD_API_TOKEN && !isProduction) {
-    return next();
-  }
-
-  const token = req.get('x-upload-token');
-  if (!token || token !== UPLOAD_API_TOKEN) {
-    return res.status(401).json({ success: false, error: 'Unauthorized upload request' });
-  }
-
-  next();
-}
+app.use('/', apiLimiter, mediaRoutes);
 
 function requireCoupleCode(req, res, next) {
   const coupleCode = req.body?.coupleCode || req.body?.context?.coupleCode;
@@ -166,57 +93,13 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
-    uploadAuthEnabled: Boolean(UPLOAD_API_TOKEN),
     aiConfigured: Boolean(process.env.HACKCLUB_API_KEY),
-    mediaRoot: MEDIA_ROOT,
-    maxUploadSizeMB: MAX_UPLOAD_SIZE_MB,
     rateLimit: {
       windowMs: RATE_LIMIT_WINDOW_MS,
       apiMax: RATE_LIMIT_MAX_REQUESTS,
       aiMax: AI_RATE_LIMIT_MAX,
-      uploadMax: UPLOAD_RATE_LIMIT_MAX,
     },
   });
-});
-
-app.post('/api/upload', uploadLimiter, requireUploadToken, upload.single('file'), (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'No file uploaded' });
-    }
-
-    const relativePath = path.relative(MEDIA_ROOT, req.file.path).replace(/\\/g, '/');
-    const requestBaseUrl = `${req.protocol}://${req.get('host')}`;
-    const baseUrl = PUBLIC_BASE_URL || requestBaseUrl;
-    const secureUrl = `${baseUrl}/media/${relativePath}`;
-
-    res.json({
-      success: true,
-      secure_url: secureUrl,
-      url: secureUrl,
-      fileName: req.file.filename,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
-    });
-  } catch (error) {
-    console.error('Error uploading file:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ success: false, error: `File too large. Max ${MAX_UPLOAD_SIZE_MB}MB allowed.` });
-    }
-    return res.status(400).json({ success: false, error: err.message });
-  }
-
-  if (err && err.message && err.message.startsWith('Unsupported media type:')) {
-    return res.status(415).json({ success: false, error: err.message });
-  }
-
-  return next(err);
 });
 
 // Generate daily prompt
@@ -375,6 +258,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Backend server running on port ${PORT}`);
   console.log(`Environment: ${NODE_ENV}`);
   console.log(`Access at: ${PUBLIC_BASE_URL || `http://localhost:${PORT}`}`);
-  console.log(`Media root: ${MEDIA_ROOT}`);
-  console.log(`Upload auth enabled: ${Boolean(UPLOAD_API_TOKEN)}`);
 });

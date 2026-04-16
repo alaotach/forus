@@ -81,6 +81,81 @@ npm start
 - Body: `{ situation?: string }`
 - Returns: `{ prompt: string, usedFallback: boolean }`
 
+### Generate Media Upload URL
+- **POST** `/generate-upload-url`
+- Headers: `Authorization: Bearer <media_token>`
+- Body: `{ type: 'image' | 'audio', userId: string, coupleCode: string, mimeType: string, fileSize: number, fileExtension?: string }`
+- Returns:
+    - `media.id` (metadata id)
+    - `media.fileKey`
+    - `media.proxyUrl` (stable backend URL: `/media/:id?raw=1`)
+    - `upload.url` (short-lived signed S3 PUT URL)
+
+### Resolve / Stream Media
+- **GET** `/media/:id`
+- Headers: `Authorization: Bearer <media_token>`
+- Returns JSON with short-lived `access.url` signed GET URL
+
+### Direct Playback Redirect (no S3 exposure in app data)
+- **GET** `/media/:id?raw=1`
+- Headers: `Authorization: Bearer <media_token>`
+- Returns HTTP 302 redirect to short-lived signed GET URL
+- Useful for `Image`, `Video`, and audio players with a stable backend URL
+
+### Issue Media Auth Token
+- **POST** `/media/auth/token`
+- Body: `{ userId: string, coupleCode: string }`
+- Returns short-lived JWT for media endpoints
+
+### Delete Media (lifecycle cleanup)
+- **DELETE** `/media/:id`
+- Headers: `Authorization: Bearer <media_token>`
+- Deletes S3 object + metadata record
+
+## AWS Media Setup
+
+1. Create a private S3 bucket and block public access.
+2. Create a DynamoDB table for media metadata.
+3. Add IAM permissions for `s3:PutObject`, `s3:GetObject`, `dynamodb:PutItem`, `dynamodb:GetItem`.
+4. Configure environment variables in `backend/.env`:
+
+```env
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=forus-private-media
+AWS_MEDIA_TABLE=forus-media-metadata
+MEDIA_AUTH_JWT_SECRET=replace_with_strong_random_secret
+MEDIA_AUTH_TOKEN_TTL_SECONDS=3600
+MEDIA_RATE_LIMIT_WINDOW_MS=300000
+MEDIA_RATE_LIMIT_MAX=180
+S3_MAX_UPLOAD_BYTES=20971520
+S3_UPLOAD_URL_TTL_SECONDS=300
+S3_DOWNLOAD_URL_TTL_SECONDS=120
+```
+
+### DynamoDB Table Shape
+
+- Table name: `AWS_MEDIA_TABLE`
+- Partition key: `id` (String)
+- Stored item fields:
+    - `id`
+    - `fileKey`
+    - `type`
+    - `ownerId`
+    - `coupleCode`
+    - `createdAt`
+
+## Legacy Data Migration
+
+If you already have Firestore docs storing `mediaUrl`, run:
+
+```bash
+npm run migrate:media-schema
+```
+
+Requirements:
+- Google application credentials for Firestore Admin SDK (`GOOGLE_APPLICATION_CREDENTIALS`)
+- Existing media URLs in `/media/:id` format
+
 ## Deployment
 
 ### Option 1: Railway

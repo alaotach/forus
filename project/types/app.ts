@@ -1,5 +1,13 @@
 import { Timestamp } from 'firebase/firestore';
 
+export interface MediaRef {
+  mediaId: string;
+  fileKey: string;
+  type: 'image' | 'audio';
+  ownerId: string;
+  createdAt: string;
+}
+
 export interface User {
   nickname: string;
   coupleCode: string;
@@ -14,7 +22,21 @@ export interface ChatMessage {
   timestamp: Timestamp;
   reactions?: { [key: string]: string[] };
   type?: 'text' | 'image' | 'audio';
-  mediaUrl?: string;
+  media?: MediaRef | null;
+  mediaUrl?: string | null;
+  replyTo?: {
+    id: string;
+    message: string;
+    sender: string;
+    type?: 'text' | 'image' | 'audio';
+    media?: MediaRef | null;
+    mediaUrl?: string | null;
+  };
+  edited?: boolean;
+  deleted?: boolean;
+  pinned?: boolean;
+  readBy?: string[];
+  readAt?: Timestamp;
 }
 
 export interface DailyParagraph {
@@ -42,6 +64,7 @@ export interface VaultItem {
   type: 'letter' | 'photo' | 'audio';
   title: string;
   content?: string;
+  media?: MediaRef;
   url?: string;
   author: string;
   timestamp: Timestamp;
