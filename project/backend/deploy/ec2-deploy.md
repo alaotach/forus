@@ -41,7 +41,7 @@ nano .env
 Set at least:
 - NODE_ENV=production
 - PORT=3000
-- PUBLIC_BASE_URL=https://api.yourdomain.com
+- PUBLIC_BASE_URL=https://forus.eryzalabs.com
 - HACKCLUB_API_KEY=...
 - AWS_REGION=...
 - AWS_S3_BUCKET=...
@@ -51,7 +51,7 @@ Set at least:
 - S3_MAX_UPLOAD_BYTES=20971520
 - S3_UPLOAD_URL_TTL_SECONDS=300
 - S3_DOWNLOAD_URL_TTL_SECONDS=120
-- ALLOWED_ORIGINS=https://your-app-domain.com
+- ALLOWED_ORIGINS=https://forus.eryzalabs.com
 
 ## 6. Install systemd service
 ```bash
@@ -65,7 +65,6 @@ sudo systemctl status forus-backend --no-pager
 ## 7. Configure Nginx reverse proxy
 ```bash
 sudo cp /home/aloo/forus/project/backend/deploy/nginx-forus-backend.conf /etc/nginx/sites-available/forus-backend
-sudo sed -i 's/api.example.com/api.yourdomain.com/g' /etc/nginx/sites-available/forus-backend
 sudo ln -sf /etc/nginx/sites-available/forus-backend /etc/nginx/sites-enabled/forus-backend
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
@@ -76,7 +75,7 @@ sudo systemctl restart nginx
 ## 8. Enable HTTPS (Let's Encrypt)
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d api.yourdomain.com
+sudo certbot --nginx -d forus.eryzalabs.com
 ```
 
 ## 8.1 Optional firewall (UFW)
@@ -90,7 +89,7 @@ sudo ufw status
 ## 9. Validate
 ```bash
 curl -sS http://127.0.0.1:3000/health
-curl -sS https://api.yourdomain.com/health
+curl -sS https://forus.eryzalabs.com/health
 ```
 
 ## 10. Logs and operations
