@@ -364,7 +364,6 @@ export default function ChatScreen() {
         } : {}),
       };
       if (mediaRef) messageData.media = mediaRef;
-      if (mediaUrl) messageData.mediaUrl = mediaUrl;
 
       await addDoc(messagesRef, messageData);
 
@@ -1142,7 +1141,7 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
                   {isMyMessage && (() => {
                     const st = getMessageStatus(item as any);
                     if (st === 'Sending') return <Text style={styles.sendingClock}>🕐</Text>;
-                    if (st === 'Failed') return <TouchableOpacity onPress={() => { setPendingMessages(p => p.filter(m => m._tempId !== (item as any)._tempId)); sendMessage(item.message, item.mediaUrl || undefined, item.type as any); }}><Text style={styles.failedIcon}>⚠️</Text></TouchableOpacity>;
+                    if (st === 'Failed') return <TouchableOpacity onPress={() => { setPendingMessages(p => p.filter(m => m._tempId !== (item as any)._tempId)); sendMessage(item.message, undefined, item.type as any, null, item.media || undefined); }}><Text style={styles.failedIcon}>⚠️</Text></TouchableOpacity>;
                     if (st === 'Read') return <CheckCheck size={11} color={isMyMessage ? '#ffffff' : '#888'} />;
                     return <Check size={11} color={isMyMessage ? 'rgba(255,255,255,0.7)' : '#aaa'} />;
                   })()}
@@ -1199,7 +1198,7 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
                       onPress={() => {
                         const failedMsg = item as any;
                         setPendingMessages(prev => prev.filter(m => m._tempId !== failedMsg._tempId));
-                        sendMessage(item.message, item.mediaUrl || undefined, item.type as any);
+                        sendMessage(item.message, undefined, item.type as any, null, item.media || undefined);
                       }}
                     >
                       <Text style={styles.failedIcon}>⚠️</Text>

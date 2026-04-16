@@ -1,12 +1,53 @@
-import { Platform } from 'react-native';
+const DEFAULT_BACKEND_URL = 'https://forus.eryzalabs.com';
+const REQUEST_TIMEOUT_MS = 12000;
 
 function getBackendUrl(): string {
-  const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
-  if (!backendUrl) {
-    throw new Error('EXPO_PUBLIC_BACKEND_URL is required in production');
+  const configuredUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.trim();
+  const backendUrl = configuredUrl || DEFAULT_BACKEND_URL;
+
+  if (!configuredUrl) {
+    console.warn('EXPO_PUBLIC_BACKEND_URL is not set; falling back to default backend URL.');
   }
 
-  return backendUrl;
+  return backendUrl.replace(/\/+$/, '');
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error: any) {
+    const message = error?.name === 'AbortError'
+      ? `Request timeout after ${timeoutMs}ms: ${url}`
+      : `Network request failed for ${url}: ${error?.message || 'unknown error'}`;
+    throw new Error(message);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function checkBackendHealth(): Promise<{ ok: boolean; status?: number; body?: any; error?: string }> {
+  const backendUrl = getBackendUrl();
+  const url = `${backendUrl}/health`;
+  try {
+    const response = await fetchWithTimeout(url, { method: 'GET' }, 8000);
+    let body: any = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+
+    if (!response.ok) {
+      return { ok: false, status: response.status, body, error: `Health check failed with status ${response.status}` };
+    }
+
+    return { ok: true, status: response.status, body };
+  } catch (error: any) {
+    return { ok: false, error: error?.message || 'unknown error' };
+  }
 }
 
 export interface CoupleContext {
@@ -83,12 +124,13 @@ export async function generateEchoResponse(
 ): Promise<string> {
   try {
     const backendUrl = getBackendUrl();
-    const response = await fetch(`${backendUrl}/api/echo-chat`, {
+    const response = await fetchWithTimeout(`${backendUrl}/api/echo-chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ 
+        coupleCode: context?.coupleCode,
         userMessage, 
         context, 
         conversationHistory 
@@ -96,14 +138,15 @@ export async function generateEchoResponse(
     });
 
     if (!response.ok) {
-      throw new Error('Failed to generate Echo response');
+      const errorBody = await response.text();
+      throw new Error(`Failed to generate Echo response (${response.status}): ${errorBody}`);
     }
 
     const data = await response.json();
     return data.response || getRandomFallbackEchoResponse();
   } catch (error) {
     console.error('Error generating Echo response:', error);
-    return getRandomFallbackEchoResponse();
+    throw error;
   }
 }
 

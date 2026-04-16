@@ -15,7 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Send, Bot, Heart } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useCouple } from '@/hooks/useCouple';
-import { generateEchoResponse, CoupleContext } from '@/services/openai';
+import { generateEchoResponse, CoupleContext, checkBackendHealth } from '@/services/openai';
 import { collection, query, orderBy, limit, getDocs, doc, getDoc, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 
@@ -198,6 +198,11 @@ export default function EchoScreen() {
 
     // Add to conversation history
     const newHistory = [...conversationHistory, { role: 'user' as const, content: currentInput }];
+    const requestContext: CoupleContext = {
+      ...coupleContext,
+      nickname: coupleData.nickname,
+      coupleCode: coupleData.coupleCode,
+    };
 
     try {
       // Save user message to Firestore
@@ -208,7 +213,7 @@ export default function EchoScreen() {
         timestamp: serverTimestamp(),
       });
 
-      const echoResponseContent = await generateEchoResponse(currentInput, coupleContext, newHistory);
+      const echoResponseContent = await generateEchoResponse(currentInput, requestContext, newHistory);
       
       const echoResponse: EchoMessage = {
         id: (Date.now() + 1).toString(),
@@ -232,9 +237,13 @@ export default function EchoScreen() {
       }, 100);
     } catch (error) {
       console.error('Error generating Echo response:', error);
+      const health = await checkBackendHealth();
+      console.error('Echo backend connectivity diagnostics:', health);
       const fallbackResponse: EchoMessage = {
         id: (Date.now() + 1).toString(),
-        content: "I'm having trouble connecting right now, but I'm still here for you. Your feelings and thoughts are always important to me. 💕",
+        content: health.ok
+          ? "I'm having trouble processing that request right now, but I'm still here for you. Your feelings and thoughts are always important to me. 💕"
+          : `I can't reach the server right now (${health.error || 'network issue'}). I'll still stay with you here. 💕`,
         isEcho: true,
         timestamp: new Date(),
       };

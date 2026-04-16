@@ -52,6 +52,17 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Request log line for each inbound HTTP call (visible in systemd journal)
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const durationMs = Date.now() - startedAt;
+    const ip = req.headers['x-forwarded-for'] || req.ip || '-';
+    console.log(`${new Date().toISOString()} ${req.method} ${req.originalUrl} ${res.statusCode} ${durationMs}ms ip=${ip}`);
+  });
+  next();
+});
+
 const apiLimiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: RATE_LIMIT_MAX_REQUESTS,
