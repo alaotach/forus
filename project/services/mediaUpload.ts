@@ -46,7 +46,7 @@ async function getLocalFileSize(uri: string): Promise<number> {
   return info.size;
 }
 
-export const uploadToCloudinary = async (
+export const uploadMediaFile = async (
   file: {
     uri: string;
     name?: string;
@@ -58,33 +58,27 @@ export const uploadToCloudinary = async (
   },
   folder: string = 'couples'
 ): Promise<UploadedMediaReference> => {
-  try {
-    const mimeType = file.type || 'application/octet-stream';
-    const mediaType = resolveMediaType(mimeType, folder);
-    const fileSize = await getLocalFileSize(file.uri);
-    const fileExtension = inferExtension(file.name, mimeType);
-    const media = await uploadLocalFileToS3(
-      file.uri,
-      mediaType,
-      identity.userId,
-      identity.coupleCode,
-      mimeType,
-      fileSize,
-      fileExtension
-    );
+  const mimeType = file.type || 'application/octet-stream';
+  const mediaType = resolveMediaType(mimeType, folder);
+  const fileSize = await getLocalFileSize(file.uri);
+  const fileExtension = inferExtension(file.name, mimeType);
 
-    return media;
-  } catch (error) {
-    console.error('Upload API error:', error);
-    throw error;
-  }
+  return uploadLocalFileToS3(
+    file.uri,
+    mediaType,
+    identity.userId,
+    identity.coupleCode,
+    mimeType,
+    fileSize,
+    fileExtension
+  );
 };
 
-export const uploadPhotoToCloudinary = async (
+export const uploadPhotoMedia = async (
   uri: string,
   identity: { userId: string; coupleCode: string }
 ): Promise<UploadedMediaReference> => {
-  return uploadToCloudinary(
+  return uploadMediaFile(
     {
       uri,
       type: 'image/jpeg',
@@ -95,11 +89,11 @@ export const uploadPhotoToCloudinary = async (
   );
 };
 
-export const uploadAudioToCloudinary = async (
+export const uploadAudioMedia = async (
   uri: string,
   identity: { userId: string; coupleCode: string }
 ): Promise<UploadedMediaReference> => {
-  return uploadToCloudinary(
+  return uploadMediaFile(
     {
       uri,
       type: 'audio/m4a',
@@ -110,11 +104,11 @@ export const uploadAudioToCloudinary = async (
   );
 };
 
-export const uploadImageToCloudinary = async (
+export const uploadImageMedia = async (
   uri: string,
   identity: { userId: string; coupleCode: string }
 ): Promise<UploadedMediaReference> => {
-  return uploadToCloudinary(
+  return uploadMediaFile(
     {
       uri,
       type: 'image/jpeg',

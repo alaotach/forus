@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Archive, Plus, FileText, Image as ImageIcon, Mic, Heart, Star, X, Send, MoreVertical, Edit2, Trash2 } from 'lucide-react-native';
+import { Archive, Plus, FileText, Image as ImageIcon, Mic, Heart, Star, X, Send, MoreVertical, Edit2, Trash2, Download } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useCouple } from '@/hooks/useCouple';
 import { collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, deleteDoc } from 'firebase/firestore';
@@ -25,8 +25,8 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAudioRecorder, useAudioPlayer } from 'expo-audio';
 import AudioPlayer from '@/components/AudioPlayer';
 import { checkStorageQuota } from '@/services/storage';
-import { uploadPhotoToCloudinary, uploadAudioToCloudinary } from '@/services/cloudinary';
-import { getSignedMediaUrl, deleteMediaById } from '@/services/media';
+import { uploadPhotoMedia, uploadAudioMedia } from '@/services/mediaUpload';
+import { getSignedMediaUrl, deleteMediaById, streamAndCacheMedia, getCachedFile, saveCachedMediaToDevice, deleteFromCache } from '@/services/media';
 import * as Audio from 'expo-audio';
 
 export default function VaultScreen() {
@@ -121,6 +121,20 @@ export default function VaultScreen() {
         rawItems.map(async (item) => {
           if (item.media?.mediaId && coupleData?.coupleCode && coupleData?.nickname) {
             try {
+              if (Platform.OS !== 'web' && item.media.fileKey) {
+                const cachedPath = await getCachedFile(item.media.fileKey);
+                if (cachedPath) {
+                  return { ...item, url: cachedPath };
+                }
+
+                const cachedMedia = await streamAndCacheMedia(
+                  item.media.mediaId,
+                  coupleData.coupleCode,
+                  coupleData.nickname
+                );
+                return { ...item, url: cachedMedia.localPath };
+              }
+
               const signedUrl = await getSignedMediaUrl(
                 item.media.mediaId,
                 coupleData.coupleCode,
@@ -224,7 +238,7 @@ export default function VaultScreen() {
     if (!coupleData) return;
     
     try {
-      const media = await uploadPhotoToCloudinary(uri, {
+      const media = await uploadPhotoMedia(uri, {
         userId: coupleData.nickname,
         coupleCode: coupleData.coupleCode,
       });
@@ -355,7 +369,7 @@ export default function VaultScreen() {
     }
 
     try {
-      const media = await uploadAudioToCloudinary(currentRecordingUri, {
+      const media = await uploadAudioMedia(currentRecordingUri, {
         userId: coupleData.nickname,
         coupleCode: coupleData.coupleCode,
       });
@@ -429,6 +443,10 @@ export default function VaultScreen() {
                   coupleData.coupleCode,
                   coupleData.nickname
                 );
+
+                if (selectedVaultItem.media.fileKey) {
+                  await deleteFromCache(selectedVaultItem.media.fileKey);
+                }
               }
 
               const itemRef = doc(db, 'vault', coupleData.coupleCode, 'items', selectedVaultItem.id);
@@ -443,6 +461,38 @@ export default function VaultScreen() {
         }
       ]
     );
+  };
+
+  const handleSaveToDevice = async () => {
+    if (!coupleData || !selectedVaultItem?.media) return;
+
+    try {
+      if (Platform.OS === 'web') {
+        Alert.alert('Not supported', 'Save to device is not supported on web.');
+        return;
+      }
+
+      await streamAndCacheMedia(
+        selectedVaultItem.media.mediaId,
+        coupleData.coupleCode,
+        coupleData.nickname
+      );
+
+      await saveCachedMediaToDevice(selectedVaultItem.media.fileKey, selectedVaultItem.media.type);
+      setOptionsModalVisible(false);
+      Alert.alert('Saved', 'Media saved to your device and removed from temporary cache.');
+    } catch (error) {
+      console.error('Error saving media to device:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('development build on Android')) {
+        Alert.alert(
+          'Expo Go Limitation',
+          'Saving media to device on Android requires a development build. Expo Go cannot grant full media-library access for this flow.'
+        );
+        return;
+      }
+      Alert.alert('Error', 'Failed to save media to device.');
+    }
   };
 
   const renderVaultItem = (item: VaultItem, index: number) => (
@@ -813,6 +863,21 @@ export default function VaultScreen() {
                   <Text style={styles.optionDesc}>Change the title of this entry</Text>
                 </View>
               </TouchableOpacity>
+
+              {selectedVaultItem?.media && (
+                <TouchableOpacity 
+                  style={styles.optionItem}
+                  onPress={handleSaveToDevice}
+                >
+                  <View style={[styles.optionIconContainer, { backgroundColor: '#f0fff5' }]}>
+                    <Download size={20} color="#20bf6b" />
+                  </View>
+                  <View style={styles.optionTextContainer}>
+                    <Text style={styles.optionLabel}>Save to Device</Text>
+                    <Text style={styles.optionDesc}>Downloads media and removes temp cache copy</Text>
+                  </View>
+                </TouchableOpacity>
+              )}
 
               <TouchableOpacity 
                 style={styles.optionItem}
@@ -1227,13 +1292,18 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'flex-end',
+    paddingHorizontal: 12,
+    paddingBottom: 96,
+    zIndex: 9999,
+    elevation: 9999,
   },
   optionsModalContent: {
     backgroundColor: '#fff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderRadius: 24,
     padding: 24,
     paddingBottom: 40,
+    zIndex: 10000,
+    elevation: 10000,
   },
   optionsModalHeader: {
     flexDirection: 'row',

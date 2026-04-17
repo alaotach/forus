@@ -33,6 +33,16 @@
       "expo-font",
       "expo-web-browser",
       "expo-audio",
+      [
+        "expo-media-library",
+        {
+          "granularPermissions": [
+            "photo",
+            "video",
+            "audio"
+          ]
+        }
+      ],
       "expo-secure-store",
       "expo-video",
       [

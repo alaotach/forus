@@ -3,8 +3,11 @@ const rateLimit = require('express-rate-limit');
 const {
   postMediaAuthToken,
   postGenerateUploadUrl,
+  postCompleteUpload,
   getMediaById,
   deleteMediaById,
+  postMediaFailureMetric,
+  getMediaFailureMetricsSnapshot,
   mediaErrorHandler,
 } = require('../controllers/mediaController');
 const { requireMediaAuth } = require('../middleware/requireMediaAuth');
@@ -20,7 +23,10 @@ const mediaAccessLimiter = rateLimit({
 });
 
 router.post('/media/auth/token', mediaAccessLimiter, postMediaAuthToken);
+router.post('/media/metrics/failure', mediaAccessLimiter, requireMediaAuth, postMediaFailureMetric);
+router.get('/media/metrics/failure', mediaAccessLimiter, requireMediaAuth, getMediaFailureMetricsSnapshot);
 router.post('/generate-upload-url', mediaAccessLimiter, requireMediaAuth, postGenerateUploadUrl);
+router.post('/complete-upload', mediaAccessLimiter, requireMediaAuth, postCompleteUpload);
 router.get('/media/:id', mediaAccessLimiter, requireMediaAuth, getMediaById);
 router.delete('/media/:id', mediaAccessLimiter, requireMediaAuth, deleteMediaById);
 

@@ -36,8 +36,8 @@ import {
 import { db } from '@/services/firebase';
 import { ChatMessage } from '@/types/app';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import { uploadPhotoToCloudinary, uploadAudioToCloudinary } from '@/services/cloudinary';
-import { getSignedMediaUrl } from '@/services/media';
+import { uploadPhotoMedia, uploadAudioMedia } from '@/services/mediaUpload';
+import { getSignedMediaUrl, streamAndCacheMedia, getCachedFile } from '@/services/media';
 import * as ImagePicker from 'expo-image-picker';
 import { useAudioPlayer, useAudioRecorder, AudioSource } from 'expo-audio';
 import * as Audio from 'expo-audio';
@@ -178,11 +178,25 @@ export default function ChatScreen() {
 
           if (message.media?.mediaId) {
             try {
-              hydrated.mediaUrl = await getSignedMediaUrl(
-                message.media.mediaId,
-                coupleData.coupleCode,
-                coupleData.nickname
-              );
+              if (Platform.OS !== 'web' && message.media.fileKey) {
+                const cachedPath = await getCachedFile(message.media.fileKey);
+                if (cachedPath) {
+                  hydrated.mediaUrl = cachedPath;
+                } else {
+                  const cachedMedia = await streamAndCacheMedia(
+                    message.media.mediaId,
+                    coupleData.coupleCode,
+                    coupleData.nickname
+                  );
+                  hydrated.mediaUrl = cachedMedia.localPath;
+                }
+              } else {
+                hydrated.mediaUrl = await getSignedMediaUrl(
+                  message.media.mediaId,
+                  coupleData.coupleCode,
+                  coupleData.nickname
+                );
+              }
             } catch {
               hydrated.mediaUrl = message.mediaUrl || null;
             }
@@ -190,11 +204,28 @@ export default function ChatScreen() {
 
           if (message.replyTo?.media?.mediaId) {
             try {
-              const replyMediaUrl = await getSignedMediaUrl(
-                message.replyTo.media.mediaId,
-                coupleData.coupleCode,
-                coupleData.nickname
-              );
+              let replyMediaUrl: string;
+
+              if (Platform.OS !== 'web' && message.replyTo.media.fileKey) {
+                const cachedReplyPath = await getCachedFile(message.replyTo.media.fileKey);
+                if (cachedReplyPath) {
+                  replyMediaUrl = cachedReplyPath;
+                } else {
+                  const cachedReply = await streamAndCacheMedia(
+                    message.replyTo.media.mediaId,
+                    coupleData.coupleCode,
+                    coupleData.nickname
+                  );
+                  replyMediaUrl = cachedReply.localPath;
+                }
+              } else {
+                replyMediaUrl = await getSignedMediaUrl(
+                  message.replyTo.media.mediaId,
+                  coupleData.coupleCode,
+                  coupleData.nickname
+                );
+              }
+
               hydrated.replyTo = {
                 ...message.replyTo,
                 mediaUrl: replyMediaUrl,
@@ -653,12 +684,12 @@ export default function ChatScreen() {
       let uploadedMedia;
       
       if (type === 'image') {
-        uploadedMedia = await uploadPhotoToCloudinary(uri, {
+        uploadedMedia = await uploadPhotoMedia(uri, {
           userId: coupleData.nickname,
           coupleCode: coupleData.coupleCode,
         });
       } else {
-        uploadedMedia = await uploadAudioToCloudinary(uri, {
+        uploadedMedia = await uploadAudioMedia(uri, {
           userId: coupleData.nickname,
           coupleCode: coupleData.coupleCode,
         });

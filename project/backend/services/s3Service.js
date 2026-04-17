@@ -1,6 +1,7 @@
 const { randomUUID } = require('crypto');
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { getSignedUrl: getS3SignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { getSignedUrl: getCloudFrontSignedUrl } = require('@aws-sdk/cloudfront-signer');
 
 const s3Region = process.env.AWS_REGION;
 const bucketName = process.env.AWS_S3_BUCKET;
@@ -17,6 +18,14 @@ const MAX_FILE_SIZE_BYTES = Number.parseInt(process.env.S3_MAX_UPLOAD_BYTES || `
 const UPLOAD_URL_TTL_SECONDS = Number.parseInt(process.env.S3_UPLOAD_URL_TTL_SECONDS || '300', 10);
 const DOWNLOAD_URL_TTL_SECONDS = Number.parseInt(process.env.S3_DOWNLOAD_URL_TTL_SECONDS || '120', 10);
 
+const CLOUDFRONT_DOMAIN = String(process.env.CLOUDFRONT_DOMAIN || '')
+  .trim()
+  .replace(/^https?:\/\//i, '')
+  .replace(/\/+$/, '');
+const CLOUDFRONT_KEY_PAIR_ID = String(process.env.CLOUDFRONT_KEY_PAIR_ID || '').trim();
+const CLOUDFRONT_PRIVATE_KEY = process.env.CLOUDFRONT_PRIVATE_KEY || '';
+const CLOUDFRONT_PRIVATE_KEY_BASE64 = process.env.CLOUDFRONT_PRIVATE_KEY_BASE64 || '';
+
 function assertAwsConfigured() {
   if (!s3Region) {
     throw new Error('AWS_REGION is required for S3 media service');
@@ -29,6 +38,35 @@ function assertAwsConfigured() {
 
 function sanitizePathPart(value) {
   return String(value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
+
+function getCloudFrontPrivateKey() {
+  if (CLOUDFRONT_PRIVATE_KEY) {
+    return CLOUDFRONT_PRIVATE_KEY.replace(/\\n/g, '\n');
+  }
+
+  if (CLOUDFRONT_PRIVATE_KEY_BASE64) {
+    try {
+      return Buffer.from(CLOUDFRONT_PRIVATE_KEY_BASE64, 'base64').toString('utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  return '';
+}
+
+function canUseCloudFrontSigning() {
+  const privateKey = getCloudFrontPrivateKey();
+  return Boolean(CLOUDFRONT_DOMAIN && CLOUDFRONT_KEY_PAIR_ID && privateKey);
+}
+
+function buildCloudFrontObjectUrl(fileKey) {
+  const encodedKey = String(fileKey || '')
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `https://${CLOUDFRONT_DOMAIN}/${encodedKey}`;
 }
 
 function normalizeExtension(fileExtension, mimeType) {
@@ -107,7 +145,7 @@ async function generateUploadUrl({ type, userId, mimeType, fileSize, fileExtensi
     },
   });
 
-  const uploadUrl = await getSignedUrl(s3Client, putCommand, {
+  const uploadUrl = await getS3SignedUrl(s3Client, putCommand, {
     expiresIn: UPLOAD_URL_TTL_SECONDS,
   });
 
@@ -125,18 +163,38 @@ async function generateDownloadUrl(fileKey) {
     throw new Error('fileKey is required');
   }
 
+  if (canUseCloudFrontSigning()) {
+    const privateKey = getCloudFrontPrivateKey();
+    const cloudFrontUrl = buildCloudFrontObjectUrl(fileKey);
+    const expiresAt = new Date(Date.now() + DOWNLOAD_URL_TTL_SECONDS * 1000).toISOString();
+
+    const signedUrl = getCloudFrontSignedUrl({
+      url: cloudFrontUrl,
+      dateLessThan: expiresAt,
+      keyPairId: CLOUDFRONT_KEY_PAIR_ID,
+      privateKey,
+    });
+
+    return {
+      signedUrl,
+      expiresIn: DOWNLOAD_URL_TTL_SECONDS,
+      delivery: 'cloudfront',
+    };
+  }
+
   const getCommand = new GetObjectCommand({
     Bucket: bucketName,
     Key: fileKey,
   });
 
-  const signedUrl = await getSignedUrl(s3Client, getCommand, {
+  const signedUrl = await getS3SignedUrl(s3Client, getCommand, {
     expiresIn: DOWNLOAD_URL_TTL_SECONDS,
   });
 
   return {
     signedUrl,
     expiresIn: DOWNLOAD_URL_TTL_SECONDS,
+    delivery: 's3',
   };
 }
 
@@ -154,10 +212,65 @@ async function deleteMediaObject(fileKey) {
   );
 }
 
+async function checkObjectExists(fileKey) {
+  assertAwsConfigured();
+  if (!fileKey) {
+    throw new Error('fileKey is required');
+  }
+
+  try {
+    await s3Client.send(
+      new HeadObjectCommand({
+        Bucket: bucketName,
+        Key: fileKey,
+      })
+    );
+    return true;
+  } catch (error) {
+    if (error?.$metadata?.httpStatusCode === 404 || error?.name === 'NotFound') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function listMediaObjects(prefix = 'uploads/') {
+  assertAwsConfigured();
+
+  const items = [];
+  let continuationToken;
+
+  do {
+    const output = await s3Client.send(
+      new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    );
+
+    for (const obj of output.Contents || []) {
+      if (obj.Key) {
+        items.push({
+          key: obj.Key,
+          lastModified: obj.LastModified ? new Date(obj.LastModified).toISOString() : null,
+          size: obj.Size || 0,
+        });
+      }
+    }
+
+    continuationToken = output.IsTruncated ? output.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  return items;
+}
+
 module.exports = {
   generateUploadUrl,
   generateDownloadUrl,
   deleteMediaObject,
+  checkObjectExists,
+  listMediaObjects,
   validateUploadRequest,
   MAX_FILE_SIZE_BYTES,
 };

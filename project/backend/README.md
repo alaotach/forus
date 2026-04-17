@@ -86,10 +86,18 @@ npm start
 - Headers: `Authorization: Bearer <media_token>`
 - Body: `{ type: 'image' | 'audio', userId: string, coupleCode: string, mimeType: string, fileSize: number, fileExtension?: string }`
 - Returns:
+    - `mediaDraft.fileKey`
+    - `finalize.uploadTicket` (short-lived finalize token)
+    - `upload.url` (short-lived signed S3 PUT URL)
+
+### Complete Media Upload
+- **POST** `/complete-upload`
+- Headers: `Authorization: Bearer <media_token>`
+- Body: `{ uploadTicket: string }`
+- Returns:
     - `media.id` (metadata id)
     - `media.fileKey`
     - `media.proxyUrl` (stable backend URL: `/media/:id?raw=1`)
-    - `upload.url` (short-lived signed S3 PUT URL)
 
 ### Resolve / Stream Media
 - **GET** `/media/:id`
@@ -112,6 +120,17 @@ npm start
 - Headers: `Authorization: Bearer <media_token>`
 - Deletes S3 object + metadata record
 
+### Report Media Failure Metric
+- **POST** `/media/metrics/failure`
+- Headers: `Authorization: Bearer <media_token>`
+- Body: `{ stage: 'generate_upload_url' | 's3_put' | 'complete_upload' | 'media_access' | 'media_download' | 'delete_media' | 'unknown', statusCode?: number, errorCode?: string, message?: string }`
+- Returns: `202 Accepted`
+
+### Read Media Failure Metrics Snapshot
+- **GET** `/media/metrics/failure`
+- Headers: `Authorization: Bearer <media_token>`
+- Returns in-memory counters + recent failure events (for operational debugging)
+
 ## AWS Media Setup
 
 1. Create a private S3 bucket and block public access.
@@ -125,12 +144,33 @@ AWS_S3_BUCKET=forus-private-media
 AWS_MEDIA_TABLE=forus-media-metadata
 MEDIA_AUTH_JWT_SECRET=replace_with_strong_random_secret
 MEDIA_AUTH_TOKEN_TTL_SECONDS=3600
+MEDIA_UPLOAD_TICKET_TTL_SECONDS=900
 MEDIA_RATE_LIMIT_WINDOW_MS=300000
 MEDIA_RATE_LIMIT_MAX=180
+MEDIA_METRICS_RECENT_EVENTS=100
 S3_MAX_UPLOAD_BYTES=20971520
 S3_UPLOAD_URL_TTL_SECONDS=300
 S3_DOWNLOAD_URL_TTL_SECONDS=120
+
+# Optional CloudFront signed delivery for media downloads
+CLOUDFRONT_DOMAIN=your-distribution.cloudfront.net
+CLOUDFRONT_KEY_PAIR_ID=your_cloudfront_key_pair_id
+# CLOUDFRONT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"
+# CLOUDFRONT_PRIVATE_KEY_BASE64=base64_encoded_private_key
 ```
+
+### CloudFront Delivery (Recommended)
+
+To reduce latency and offload media delivery, configure CloudFront in front of the private S3 bucket:
+
+1. Create a CloudFront distribution with S3 origin and Origin Access Control (OAC).
+2. Keep bucket public access blocked.
+3. Configure backend env with:
+    - `CLOUDFRONT_DOMAIN`
+    - `CLOUDFRONT_KEY_PAIR_ID`
+    - one of `CLOUDFRONT_PRIVATE_KEY` or `CLOUDFRONT_PRIVATE_KEY_BASE64`
+4. Backend will automatically return CloudFront signed URLs from `GET /media/:id`.
+5. If CloudFront vars are absent, backend safely falls back to S3 signed URLs.
 
 ### DynamoDB Table Shape
 

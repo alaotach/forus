@@ -1,5 +1,6 @@
-const DEFAULT_BACKEND_URL = 'https://forus.eryzalabs.com';
+const DEFAULT_BACKEND_URL = 'http://13.60.188.184:3000';
 const REQUEST_TIMEOUT_MS = 12000;
+let hasLoggedBackendUrl = false;
 
 function getBackendUrl(): string {
   const configuredUrl = process.env.EXPO_PUBLIC_BACKEND_URL?.trim();
@@ -9,7 +10,12 @@ function getBackendUrl(): string {
     console.warn('EXPO_PUBLIC_BACKEND_URL is not set; falling back to default backend URL.');
   }
 
-  return backendUrl.replace(/\/+$/, '');
+  const normalizedUrl = backendUrl.replace(/\/+$/, '');
+  if (!hasLoggedBackendUrl) {
+    hasLoggedBackendUrl = true;
+    console.log(`OpenAI service using backend URL: ${normalizedUrl}`);
+  }
+  return normalizedUrl;
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<Response> {

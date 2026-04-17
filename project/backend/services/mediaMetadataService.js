@@ -1,6 +1,6 @@
 const { randomUUID } = require('crypto');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, GetCommand, DeleteCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 
 const region = process.env.AWS_REGION;
 const tableName = process.env.AWS_MEDIA_TABLE;
@@ -75,8 +75,34 @@ async function deleteMediaMetadataById(id) {
   );
 }
 
+async function listAllMediaMetadata() {
+  assertMetadataConfigured();
+
+  const items = [];
+  let ExclusiveStartKey;
+
+  do {
+    const output = await docClient.send(
+      new ScanCommand({
+        TableName: tableName,
+        ProjectionExpression: 'id, fileKey, ownerId, coupleCode, #t, createdAt',
+        ExpressionAttributeNames: {
+          '#t': 'type',
+        },
+        ExclusiveStartKey,
+      })
+    );
+
+    items.push(...(output.Items || []));
+    ExclusiveStartKey = output.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+
+  return items;
+}
+
 module.exports = {
   createMediaMetadata,
   getMediaMetadataById,
   deleteMediaMetadataById,
+  listAllMediaMetadata,
 };

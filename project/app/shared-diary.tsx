@@ -35,7 +35,7 @@ import { db } from '@/services/firebase';
 import * as ImagePicker from 'expo-image-picker';
 import VoiceRecorder from '@/components/VoiceRecorder';
 import AudioPlayer from '@/components/AudioPlayer';
-import { uploadImageToCloudinary, uploadAudioToCloudinary } from '@/services/cloudinary';
+import { uploadImageMedia, uploadAudioMedia } from '@/services/mediaUpload';
 import { getSignedMediaUrl, deleteMediaById } from '@/services/media';
 import { MediaRef } from '@/types/app';
 
@@ -230,7 +230,7 @@ export default function SharedDiaryScreen() {
   const uploadImage = async (uri: string) => {
     if (!coupleData || !selectedDate) return;
     try {
-      const media = await uploadImageToCloudinary(uri, {
+      const media = await uploadImageMedia(uri, {
         userId: coupleData.nickname,
         coupleCode: coupleData.coupleCode,
       });
@@ -252,7 +252,7 @@ export default function SharedDiaryScreen() {
   const onRecordingComplete = async (audioUri: string, duration?: number) => {
     if (!coupleData || !selectedDate) return;
     try {
-      const media = await uploadAudioToCloudinary(audioUri, {
+      const media = await uploadAudioMedia(audioUri, {
         userId: coupleData.nickname,
         coupleCode: coupleData.coupleCode,
       });

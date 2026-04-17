@@ -1,8 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Constants from 'expo-constants';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import { Platform } from 'react-native';
 import { getMediaAuthToken } from './mediaAuth';
+import { reportMediaFailureMetric } from './mediaMetrics';
 
 type MediaType = 'image' | 'audio';
 
@@ -25,12 +27,10 @@ export interface MediaReference {
 
 interface GenerateUploadUrlResponse {
   success: boolean;
-  media: {
-    id: string;
+  mediaDraft: {
     fileKey: string;
     type: MediaType;
     ownerId: string;
-    createdAt: string;
   };
   upload: {
     method: 'PUT';
@@ -40,6 +40,21 @@ interface GenerateUploadUrlResponse {
     requiredHeaders: {
       'Content-Type': string;
     };
+  };
+  finalize: {
+    uploadTicket: string;
+    expiresIn: number;
+  };
+}
+
+interface CompleteUploadResponse {
+  success: boolean;
+  media: {
+    id: string;
+    fileKey: string;
+    type: MediaType;
+    ownerId: string;
+    createdAt: string;
   };
 }
 
@@ -72,6 +87,9 @@ type DownloadProgress = {
 
 const CACHE_MAP_KEY = 'media_cache_map_v1';
 const CACHE_DIR = `${FileSystem.cacheDirectory || ''}media-cache/`;
+const CACHE_MAX_BYTES = 100 * 1024 * 1024;
+const CACHE_ENTRY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const NETWORK_TIMEOUT_MS = 15000;
 
 function getBackendUrl(): string {
   const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -80,6 +98,22 @@ function getBackendUrl(): string {
   }
 
   return backendUrl;
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs: number = NETWORK_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`Request timeout after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function djb2Hash(input: string): string {
@@ -139,13 +173,71 @@ async function writeCacheMap(cacheMap: CacheMap): Promise<void> {
   await AsyncStorage.setItem(CACHE_MAP_KEY, JSON.stringify(cacheMap));
 }
 
+async function deleteFileIfExists(path: string): Promise<void> {
+  const info = await FileSystem.getInfoAsync(path);
+  if (info.exists) {
+    await FileSystem.deleteAsync(path, { idempotent: true });
+  }
+}
+
+async function enforceCachePolicy(cacheMap: CacheMap): Promise<CacheMap> {
+  if (Platform.OS === 'web') return cacheMap;
+
+  const now = Date.now();
+  const validEntries: Array<{ fileKey: string; localPath: string; updatedAt: number; size: number }> = [];
+
+  for (const [fileKey, entry] of Object.entries(cacheMap)) {
+    if (!entry?.localPath || typeof entry.updatedAt !== 'number') {
+      continue;
+    }
+
+    const isExpired = now - entry.updatedAt > CACHE_ENTRY_TTL_MS;
+    if (isExpired) {
+      await deleteFileIfExists(entry.localPath);
+      continue;
+    }
+
+    const info = await FileSystem.getInfoAsync(entry.localPath, { size: true });
+    if (!info.exists) {
+      continue;
+    }
+
+    validEntries.push({
+      fileKey,
+      localPath: entry.localPath,
+      updatedAt: entry.updatedAt,
+      size: typeof info.size === 'number' ? info.size : 0,
+    });
+  }
+
+  // Keep most recently used entries first (LRU eviction for overflow).
+  validEntries.sort((a, b) => b.updatedAt - a.updatedAt);
+
+  let totalBytes = 0;
+  const prunedMap: CacheMap = {};
+  for (const item of validEntries) {
+    if (totalBytes + item.size <= CACHE_MAX_BYTES) {
+      prunedMap[item.fileKey] = {
+        localPath: item.localPath,
+        updatedAt: item.updatedAt,
+      };
+      totalBytes += item.size;
+    } else {
+      await deleteFileIfExists(item.localPath);
+    }
+  }
+
+  return prunedMap;
+}
+
 async function setCachedFile(fileKey: string, localPath: string): Promise<void> {
   const cacheMap = await readCacheMap();
   cacheMap[fileKey] = {
     localPath,
     updatedAt: Date.now(),
   };
-  await writeCacheMap(cacheMap);
+  const pruned = await enforceCachePolicy(cacheMap);
+  await writeCacheMap(pruned);
 }
 
 export async function getCachedFile(fileKey: string): Promise<string | null> {
@@ -155,6 +247,13 @@ export async function getCachedFile(fileKey: string): Promise<string | null> {
   const entry = cacheMap[fileKey];
   if (!entry?.localPath) return null;
 
+  if (Date.now() - entry.updatedAt > CACHE_ENTRY_TTL_MS) {
+    await deleteFileIfExists(entry.localPath);
+    delete cacheMap[fileKey];
+    await writeCacheMap(cacheMap);
+    return null;
+  }
+
   const info = await FileSystem.getInfoAsync(entry.localPath);
   if (!info.exists) {
     delete cacheMap[fileKey];
@@ -162,27 +261,54 @@ export async function getCachedFile(fileKey: string): Promise<string | null> {
     return null;
   }
 
+  // Refresh access timestamp to support LRU eviction.
+  cacheMap[fileKey] = {
+    ...entry,
+    updatedAt: Date.now(),
+  };
+  await writeCacheMap(cacheMap);
+
   return entry.localPath;
 }
 
 export async function requestUploadUrl(payload: GenerateUploadUrlPayload): Promise<GenerateUploadUrlResponse> {
-  const backendUrl = getBackendUrl();
-  const token = await getMediaAuthToken(payload.coupleCode, payload.userId);
-  const response = await fetch(`${backendUrl}/generate-upload-url`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(payload),
-  });
+  try {
+    const backendUrl = getBackendUrl();
+    const token = await getMediaAuthToken(payload.coupleCode, payload.userId);
+    const response = await fetchWithTimeout(`${backendUrl}/generate-upload-url`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`generate-upload-url failed (${response.status}): ${text}`);
+    if (!response.ok) {
+      const text = await response.text();
+      await reportMediaFailureMetric({
+        stage: 'generate_upload_url',
+        coupleCode: payload.coupleCode,
+        userId: payload.userId,
+        statusCode: response.status,
+        message: text,
+      });
+      throw new Error(`generate-upload-url failed (${response.status}): ${text}`);
+    }
+
+    return response.json() as Promise<GenerateUploadUrlResponse>;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (!errorMessage.includes('generate-upload-url failed')) {
+      await reportMediaFailureMetric({
+        stage: 'generate_upload_url',
+        coupleCode: payload.coupleCode,
+        userId: payload.userId,
+        message: errorMessage,
+      });
+    }
+    throw error;
   }
-
-  return response.json() as Promise<GenerateUploadUrlResponse>;
 }
 
 export async function uploadLocalFileToS3(
@@ -206,7 +332,7 @@ export async function uploadLocalFileToS3(
   const sourceResponse = await fetch(localUri);
   const blob = await sourceResponse.blob();
 
-  const putResponse = await fetch(uploadIntent.upload.url, {
+  const putResponse = await fetchWithTimeout(uploadIntent.upload.url, {
     method: 'PUT',
     headers: {
       'Content-Type': mimeType,
@@ -215,33 +341,119 @@ export async function uploadLocalFileToS3(
   });
 
   if (!putResponse.ok) {
-    throw new Error(`S3 upload failed (${putResponse.status})`);
+    const errorBody = await putResponse.text();
+    let uploadHost = 'unknown';
+    let uploadPath = 'unknown';
+    try {
+      const parsed = new URL(uploadIntent.upload.url);
+      uploadHost = parsed.host;
+      uploadPath = parsed.pathname;
+    } catch {
+      // keep unknown placeholders
+    }
+
+    await reportMediaFailureMetric({
+      stage: 's3_put',
+      coupleCode,
+      userId,
+      statusCode: putResponse.status,
+      message: errorBody,
+    });
+
+    throw new Error(
+      `S3 upload failed (${putResponse.status}) host=${uploadHost} path=${uploadPath} body=${errorBody}`
+    );
   }
 
+  const backendUrl = getBackendUrl();
+  const token = await getMediaAuthToken(coupleCode, userId);
+  const completeResponse = await fetchWithTimeout(`${backendUrl}/complete-upload`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ uploadTicket: uploadIntent.finalize.uploadTicket }),
+  });
+
+  if (!completeResponse.ok) {
+    const text = await completeResponse.text();
+    await reportMediaFailureMetric({
+      stage: 'complete_upload',
+      coupleCode,
+      userId,
+      statusCode: completeResponse.status,
+      message: text,
+    });
+    throw new Error(`complete-upload failed (${completeResponse.status}): ${text}`);
+  }
+
+  const completed = (await completeResponse.json()) as CompleteUploadResponse;
+
   return {
-    mediaId: uploadIntent.media.id,
-    fileKey: uploadIntent.media.fileKey,
-    type: uploadIntent.media.type,
-    ownerId: uploadIntent.media.ownerId,
-    createdAt: uploadIntent.media.createdAt,
+    mediaId: completed.media.id,
+    fileKey: completed.media.fileKey,
+    type: completed.media.type,
+    ownerId: completed.media.ownerId,
+    createdAt: completed.media.createdAt,
   };
 }
 
 export async function fetchMediaAccess(mediaId: string, coupleCode: string, userId: string): Promise<MediaAccessResponse> {
-  const backendUrl = getBackendUrl();
-  const token = await getMediaAuthToken(coupleCode, userId);
-  const response = await fetch(`${backendUrl}/media/${encodeURIComponent(mediaId)}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
+  try {
+    const backendUrl = getBackendUrl();
+    const token = await getMediaAuthToken(coupleCode, userId);
+    const response = await fetchWithTimeout(`${backendUrl}/media/${encodeURIComponent(mediaId)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`media access failed (${response.status}): ${text}`);
+    if (!response.ok) {
+      const text = await response.text();
+      await reportMediaFailureMetric({
+        stage: 'media_access',
+        coupleCode,
+        userId,
+        statusCode: response.status,
+        message: text,
+      });
+      throw new Error(`media access failed (${response.status}): ${text}`);
+    }
+
+    return response.json() as Promise<MediaAccessResponse>;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (!errorMessage.includes('media access failed')) {
+      await reportMediaFailureMetric({
+        stage: 'media_access',
+        coupleCode,
+        userId,
+        message: errorMessage,
+      });
+    }
+    throw error;
+  }
+}
+
+async function fetchMediaAccessWithRetry(
+  mediaId: string,
+  coupleCode: string,
+  userId: string,
+  attempts: number = 2
+): Promise<MediaAccessResponse> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await fetchMediaAccess(mediaId, coupleCode, userId);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+    }
   }
 
-  return response.json() as Promise<MediaAccessResponse>;
+  throw lastError instanceof Error ? lastError : new Error('Failed to fetch media access after retries');
 }
 
 export async function streamAndCacheMedia(
@@ -250,7 +462,7 @@ export async function streamAndCacheMedia(
   userId: string,
   onProgress?: (progress: DownloadProgress) => void
 ): Promise<{ localPath: string; fileKey: string; type: MediaType }> {
-  const access = await fetchMediaAccess(mediaId, coupleCode, userId);
+  const access = await fetchMediaAccessWithRetry(mediaId, coupleCode, userId);
   const { fileKey, type } = access.media;
 
   const cachedPath = await getCachedFile(fileKey);
@@ -273,15 +485,35 @@ export async function streamAndCacheMedia(
   await ensureCacheDirectory();
   const targetPath = getCacheFilePath(fileKey, type);
 
-  const downloader = FileSystem.createDownloadResumable(
-    access.access.url,
-    targetPath,
-    {},
-    onProgress
-  );
+  let downloadResult: FileSystem.FileSystemDownloadResult | undefined;
+  let lastDownloadError: unknown;
 
-  const downloadResult = await downloader.downloadAsync();
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const downloadUrl =
+        attempt === 1
+          ? access.access.url
+          : (await fetchMediaAccessWithRetry(mediaId, coupleCode, userId)).access.url;
+
+      const downloader = FileSystem.createDownloadResumable(
+        downloadUrl,
+        targetPath,
+        {},
+        onProgress
+      );
+
+      downloadResult = await downloader.downloadAsync();
+      break;
+    } catch (error) {
+      lastDownloadError = error;
+      await deleteFileIfExists(targetPath);
+    }
+  }
+
   if (!downloadResult?.uri) {
+    if (lastDownloadError instanceof Error) {
+      throw lastDownloadError;
+    }
     throw new Error('Download failed: no local URI returned');
   }
 
@@ -328,6 +560,13 @@ export async function deleteMediaById(mediaId: string, coupleCode: string, userI
 
   if (!response.ok) {
     const text = await response.text();
+    await reportMediaFailureMetric({
+      stage: 'delete_media',
+      coupleCode,
+      userId,
+      statusCode: response.status,
+      message: text,
+    });
     throw new Error(`Failed to delete media (${response.status}): ${text}`);
   }
 }
@@ -337,9 +576,21 @@ export async function saveCachedMediaToDevice(fileKey: string, mediaType: MediaT
     throw new Error('Save to device is not supported in web mode');
   }
 
+  // Expo Go on Android cannot grant full media-library permissions for this flow.
+  if (Platform.OS === 'android' && Constants.executionEnvironment === 'storeClient') {
+    throw new Error('Save to device requires a development build on Android (Expo Go limitation).');
+  }
+
   const cachedPath = await getCachedFile(fileKey);
   if (!cachedPath) {
     throw new Error('No cached media found for this fileKey');
+  }
+
+  const granularPermissions: Array<'photo' | 'video' | 'audio'> =
+    mediaType === 'audio' ? ['audio'] : ['photo'];
+  const permission = await MediaLibrary.requestPermissionsAsync(false, granularPermissions);
+  if (!permission.granted) {
+    throw new Error(`Media library permission denied for ${mediaType}`);
   }
 
   const ext = mediaType === 'image' ? 'jpg' : 'm4a';
@@ -351,10 +602,7 @@ export async function saveCachedMediaToDevice(fileKey: string, mediaType: MediaT
     to: destination,
   });
 
-  const permission = await MediaLibrary.requestPermissionsAsync();
-  if (permission.granted) {
-    await MediaLibrary.saveToLibraryAsync(destination);
-  }
+  await MediaLibrary.saveToLibraryAsync(destination);
 
   await deleteFromCache(fileKey);
 
