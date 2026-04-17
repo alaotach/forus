@@ -10,12 +10,13 @@ import {
   Image,
   Dimensions,
   Animated,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
   ArrowLeft, ChevronLeft, ChevronRight,
-  Heart, Camera, Mic, Image as ImageIcon, Send, Play, Pause, Trash2
+  Heart, Camera, Mic, Image as ImageIcon, Send, Play, Pause, Trash2, Download
 } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useCouple } from '@/hooks/useCouple';
@@ -36,7 +37,7 @@ import * as ImagePicker from 'expo-image-picker';
 import VoiceRecorder from '@/components/VoiceRecorder';
 import AudioPlayer from '@/components/AudioPlayer';
 import { uploadImageMedia, uploadAudioMedia } from '@/services/mediaUpload';
-import { getSignedMediaUrl, deleteMediaById } from '@/services/media';
+import { getCachedFile, streamAndCacheMedia, deleteMediaById } from '@/services/media';
 import { MediaRef } from '@/types/app';
 
 const { width } = Dimensions.get('window');
@@ -65,6 +66,8 @@ export default function SharedDiaryScreen() {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'me' | 'partner'>('me');
   const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [downloadingEntryById, setDownloadingEntryById] = useState<Record<string, boolean>>({});
+  const [unavailableEntryById, setUnavailableEntryById] = useState<Record<string, boolean>>({});
 
   const [textContent, setTextContent] = useState('');
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
@@ -122,12 +125,13 @@ export default function SharedDiaryScreen() {
         rawEntries.map(async (entry) => {
           if (entry.media?.mediaId && coupleData?.coupleCode && coupleData?.nickname) {
             try {
-              const signedUrl = await getSignedMediaUrl(
-                entry.media.mediaId,
-                coupleData.coupleCode,
-                coupleData.nickname
-              );
-              return { ...entry, mediaUrl: signedUrl };
+              if (entry.media.fileKey) {
+                const cachedPath = await getCachedFile(entry.media.fileKey);
+                if (cachedPath) {
+                  return { ...entry, mediaUrl: cachedPath };
+                }
+              }
+              return { ...entry, mediaUrl: undefined };
             } catch {
               return entry;
             }
@@ -138,6 +142,35 @@ export default function SharedDiaryScreen() {
 
       setEntries(hydratedEntries);
     });
+  };
+
+  const downloadEntryMedia = async (entry: DiaryEntry) => {
+    if (!coupleData || !entry.media?.mediaId) return;
+
+    setDownloadingEntryById((prev) => ({ ...prev, [entry.id]: true }));
+    setUnavailableEntryById((prev) => ({ ...prev, [entry.id]: false }));
+
+    try {
+      const downloaded = await streamAndCacheMedia(
+        entry.media.mediaId,
+        coupleData.coupleCode,
+        coupleData.nickname
+      );
+
+      setEntries((prev) =>
+        prev.map((item) =>
+          item.id === entry.id
+            ? { ...item, mediaUrl: downloaded.localPath }
+            : item
+        )
+      );
+    } catch (error) {
+      console.error('Error downloading diary media:', error);
+      setUnavailableEntryById((prev) => ({ ...prev, [entry.id]: true }));
+      Alert.alert('Download Failed', 'Media is not available right now.');
+    } finally {
+      setDownloadingEntryById((prev) => ({ ...prev, [entry.id]: false }));
+    }
   };
 
   const entriesByDate = useMemo(() => {
@@ -394,14 +427,52 @@ export default function SharedDiaryScreen() {
           <Text style={styles.diaryTextContent}>{entry.content}</Text>
         )}
         
-        {entry.type === 'image' && (
-          <Image source={{ uri: entry.mediaUrl }} style={styles.diaryImageBlock} />
+        {entry.type === 'image' && entry.media && (
+          entry.mediaUrl && !unavailableEntryById[entry.id] ? (
+            <Image
+              source={{ uri: entry.mediaUrl }}
+              style={styles.diaryImageBlock}
+              onError={() => setUnavailableEntryById((prev) => ({ ...prev, [entry.id]: true }))}
+            />
+          ) : downloadingEntryById[entry.id] ? (
+            <View style={[styles.diaryImagePlaceholder, styles.mediaDownloadContainer]}>
+              <ActivityIndicator size="small" color="#ff6b9d" style={styles.mediaLoadingSpinner} />
+              <Text style={styles.mediaDownloadText}>Downloading image...</Text>
+            </View>
+          ) : unavailableEntryById[entry.id] ? (
+            <View style={[styles.diaryImagePlaceholder, styles.mediaDownloadContainer]}>
+              <Text style={styles.mediaUnavailableText}>Not available</Text>
+            </View>
+          ) : (
+            <View style={styles.diaryImagePlaceholder}>
+              <TouchableOpacity style={styles.mediaDownloadButton} onPress={() => downloadEntryMedia(entry)}>
+                <Download size={18} color="#ff6b9d" />
+                <Text style={styles.mediaDownloadAction}>Download image</Text>
+              </TouchableOpacity>
+            </View>
+          )
         )}
 
-        {entry.type === 'voice' && entry.mediaUrl && (
-          <View style={{ marginTop: 8 }}>
-            <AudioPlayer audioUrl={entry.mediaUrl} duration={entry.duration} />
-          </View>
+        {entry.type === 'voice' && entry.media && (
+          entry.mediaUrl && !unavailableEntryById[entry.id] ? (
+            <View style={{ marginTop: 8 }}>
+              <AudioPlayer audioUrl={entry.mediaUrl} duration={entry.duration} />
+            </View>
+          ) : downloadingEntryById[entry.id] ? (
+            <View style={styles.mediaDownloadContainer}>
+              <ActivityIndicator size="small" color="#ff6b9d" style={styles.mediaLoadingSpinner} />
+              <Text style={styles.mediaDownloadText}>Downloading audio...</Text>
+            </View>
+          ) : unavailableEntryById[entry.id] ? (
+            <View style={styles.mediaDownloadContainer}>
+              <Text style={styles.mediaUnavailableText}>Not available</Text>
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.mediaDownloadButton} onPress={() => downloadEntryMedia(entry)}>
+              <Download size={16} color="#ff6b9d" />
+              <Text style={styles.mediaDownloadAction}>Download audio</Text>
+            </TouchableOpacity>
+          )
         )}
       </View>
     );
@@ -670,6 +741,48 @@ const styles = StyleSheet.create({
   diaryTime: { fontSize: 11, fontFamily: 'Inter-Medium', color: '#ccc' },
   diaryTextContent: { fontSize: 15, fontFamily: 'Inter-Regular', color: '#333', lineHeight: 24 },
   diaryImageBlock: { width: '100%', height: 250, borderRadius: 12, marginTop: 8 },
+  diaryImagePlaceholder: {
+    width: '100%',
+    height: 250,
+    borderRadius: 12,
+    marginTop: 8,
+    backgroundColor: '#fff7fb',
+    overflow: 'hidden',
+  },
+  mediaDownloadButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255,255,255,0.76)',
+  },
+  mediaDownloadAction: {
+    fontSize: 13,
+    fontFamily: 'Inter-SemiBold',
+    color: '#ff6b9d',
+  },
+  mediaDownloadContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mediaLoadingSpinner: {
+    marginBottom: 6,
+  },
+  mediaDownloadText: {
+    fontSize: 13,
+    fontFamily: 'Inter-Medium',
+    color: '#b56f8a',
+  },
+  mediaUnavailableText: {
+    fontSize: 13,
+    fontFamily: 'Inter-SemiBold',
+    color: '#c0392b',
+  },
   
   voiceContainerBlock: {
     flexDirection: 'row',

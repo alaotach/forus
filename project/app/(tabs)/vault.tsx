@@ -12,6 +12,7 @@ import {
   TextInput,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -26,8 +27,56 @@ import { useAudioRecorder, useAudioPlayer } from 'expo-audio';
 import AudioPlayer from '@/components/AudioPlayer';
 import { checkStorageQuota } from '@/services/storage';
 import { uploadPhotoMedia, uploadAudioMedia } from '@/services/mediaUpload';
-import { getSignedMediaUrl, deleteMediaById, streamAndCacheMedia, getCachedFile, saveCachedMediaToDevice, deleteFromCache } from '@/services/media';
+import { deleteMediaById, streamAndCacheMedia, getCachedFile, saveCachedMediaToDevice, deleteFromCache } from '@/services/media';
 import * as Audio from 'expo-audio';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const VAULT_OFFLINE_CACHE_PREFIX = 'vault_offline_v1:';
+
+function toTimestampLike(ms?: number) {
+  const safeMs = Number.isFinite(ms) ? Number(ms) : Date.now();
+  return {
+    toDate: () => new Date(safeMs),
+    seconds: Math.floor(safeMs / 1000),
+    nanoseconds: 0,
+  } as any;
+}
+
+function toMillis(input: any): number {
+  try {
+    if (input?.toDate) {
+      return new Date(input.toDate()).getTime();
+    }
+    if (typeof input?.seconds === 'number') {
+      return input.seconds * 1000;
+    }
+    if (typeof input === 'string' || typeof input === 'number') {
+      const parsed = new Date(input).getTime();
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  } catch {
+    // fallback below
+  }
+  return Date.now();
+}
+
+function serializeVaultItemsForOffline(items: VaultItem[]) {
+  return items.map((item) => ({
+    ...item,
+    timestampMs: toMillis((item as any).timestamp),
+  }));
+}
+
+function deserializeVaultItemsFromOffline(raw: any[]): VaultItem[] {
+  return (raw || []).map((item) => {
+    const restored: any = {
+      ...item,
+      timestamp: toTimestampLike(item.timestampMs),
+    };
+    delete restored.timestampMs;
+    return restored as VaultItem;
+  });
+}
 
 export default function VaultScreen() {
   const { coupleData, isConnected, isLoading } = useCouple();
@@ -51,7 +100,12 @@ export default function VaultScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
+  const [uploadingMediaKind, setUploadingMediaKind] = useState<'photo' | 'audio' | null>(null);
+  const [downloadingItemById, setDownloadingItemById] = useState<Record<string, boolean>>({});
+  const [unavailableItemById, setUnavailableItemById] = useState<Record<string, boolean>>({});
+  const uploadedLocalMediaPathByFileKeyRef = useRef<Record<string, string>>({});
   const recordingTimer = useRef<NodeJS.Timeout | null>(null);
+  const isUploadingMedia = uploadingMediaKind !== null;
   
   const recorder = useAudioRecorder({
     android: {
@@ -108,6 +162,21 @@ export default function VaultScreen() {
       return;
     }
 
+    const offlineCacheKey = `${VAULT_OFFLINE_CACHE_PREFIX}${coupleData.coupleCode}`;
+    // Render cached vault list immediately for cold-start offline behavior.
+    AsyncStorage.getItem(offlineCacheKey)
+      .then((raw) => {
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const restored = deserializeVaultItemsFromOffline(parsed);
+        if (restored.length > 0) {
+          setVaultItems(restored);
+        }
+      })
+      .catch((error) => {
+        console.log('Vault offline cache read skipped:', error?.message || error);
+      });
+
     const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
     const q = query(vaultRef, orderBy('timestamp', 'desc'));
 
@@ -121,26 +190,21 @@ export default function VaultScreen() {
         rawItems.map(async (item) => {
           if (item.media?.mediaId && coupleData?.coupleCode && coupleData?.nickname) {
             try {
-              if (Platform.OS !== 'web' && item.media.fileKey) {
+              if (item.media.fileKey) {
                 const cachedPath = await getCachedFile(item.media.fileKey);
                 if (cachedPath) {
                   return { ...item, url: cachedPath };
                 }
 
-                const cachedMedia = await streamAndCacheMedia(
-                  item.media.mediaId,
-                  coupleData.coupleCode,
-                  coupleData.nickname
-                );
-                return { ...item, url: cachedMedia.localPath };
+                if (item.author === coupleData.nickname) {
+                  const localPath = uploadedLocalMediaPathByFileKeyRef.current[item.media.fileKey];
+                  if (localPath) {
+                    return { ...item, url: localPath };
+                  }
+                }
               }
 
-              const signedUrl = await getSignedMediaUrl(
-                item.media.mediaId,
-                coupleData.coupleCode,
-                coupleData.nickname
-              );
-              return { ...item, url: signedUrl };
+              return { ...item, url: undefined };
             } catch {
               return item;
             }
@@ -151,6 +215,9 @@ export default function VaultScreen() {
       );
 
       setVaultItems(hydratedItems);
+      AsyncStorage.setItem(offlineCacheKey, JSON.stringify(serializeVaultItemsForOffline(hydratedItems))).catch((error) => {
+        console.log('Vault offline cache write skipped:', error?.message || error);
+      });
     });
 
     // Animate in
@@ -193,6 +260,7 @@ export default function VaultScreen() {
 
   const handleAddItem = async (type: 'letter' | 'photo' | 'audio') => {
     if (!coupleData) return;
+    if (isUploadingMedia) return;
     
     // Check storage quota
     const quota = await checkStorageQuota(coupleData.coupleCode);
@@ -219,6 +287,7 @@ export default function VaultScreen() {
   };
 
   const pickImage = async () => {
+    if (isUploadingMedia) return;
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
@@ -235,13 +304,18 @@ export default function VaultScreen() {
   };
 
   const uploadPhoto = async (uri: string) => {
-    if (!coupleData) return;
+    if (!coupleData || isUploadingMedia) return;
     
     try {
+      setUploadingMediaKind('photo');
       const media = await uploadPhotoMedia(uri, {
         userId: coupleData.nickname,
         coupleCode: coupleData.coupleCode,
       });
+
+      if (media?.fileKey) {
+        uploadedLocalMediaPathByFileKeyRef.current[media.fileKey] = uri;
+      }
 
       const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
       await addDoc(vaultRef, {
@@ -266,6 +340,8 @@ export default function VaultScreen() {
     } catch (error) {
       console.error('Error uploading photo:', error);
       Alert.alert('Error', 'Failed to upload photo');
+    } finally {
+      setUploadingMediaKind(null);
     }
   };
 
@@ -363,16 +439,21 @@ export default function VaultScreen() {
   };
 
   const saveAudio = async () => {
-    if (!coupleData || !currentRecordingUri) {
+    if (!coupleData || !currentRecordingUri || isUploadingMedia) {
       Alert.alert('Error', 'No audio recorded');
       return;
     }
 
     try {
+      setUploadingMediaKind('audio');
       const media = await uploadAudioMedia(currentRecordingUri, {
         userId: coupleData.nickname,
         coupleCode: coupleData.coupleCode,
       });
+
+      if (media?.fileKey) {
+        uploadedLocalMediaPathByFileKeyRef.current[media.fileKey] = currentRecordingUri;
+      }
 
       const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
       await addDoc(vaultRef, {
@@ -401,6 +482,8 @@ export default function VaultScreen() {
     } catch (error) {
       console.error('Error saving audio:', error);
       Alert.alert('Error', 'Failed to save audio');
+    } finally {
+      setUploadingMediaKind(null);
     }
   };
 
@@ -478,7 +561,16 @@ export default function VaultScreen() {
         coupleData.nickname
       );
 
-      await saveCachedMediaToDevice(selectedVaultItem.media.fileKey, selectedVaultItem.media.type);
+      const destination = await saveCachedMediaToDevice(selectedVaultItem.media.fileKey, selectedVaultItem.media.type);
+      const updatedItems = vaultItems.map((item) =>
+        item.id === selectedVaultItem.id
+          ? { ...item, url: destination }
+          : item
+      );
+      setVaultItems(updatedItems);
+      const offlineCacheKey = `${VAULT_OFFLINE_CACHE_PREFIX}${coupleData.coupleCode}`;
+      AsyncStorage.setItem(offlineCacheKey, JSON.stringify(serializeVaultItemsForOffline(updatedItems))).catch(() => {});
+      setUnavailableItemById((prev) => ({ ...prev, [selectedVaultItem.id]: false }));
       setOptionsModalVisible(false);
       Alert.alert('Saved', 'Media saved to your device and removed from temporary cache.');
     } catch (error) {
@@ -492,6 +584,36 @@ export default function VaultScreen() {
         return;
       }
       Alert.alert('Error', 'Failed to save media to device.');
+    }
+  };
+
+  const handleDownloadVaultItem = async (item: VaultItem) => {
+    if (!coupleData || !item.media?.mediaId) return;
+
+    setDownloadingItemById((prev) => ({ ...prev, [item.id]: true }));
+    setUnavailableItemById((prev) => ({ ...prev, [item.id]: false }));
+
+    try {
+      const downloaded = await streamAndCacheMedia(
+        item.media.mediaId,
+        coupleData.coupleCode,
+        coupleData.nickname
+      );
+
+      const updatedItems = vaultItems.map((entry) =>
+        entry.id === item.id
+          ? { ...entry, url: downloaded.localPath }
+          : entry
+      );
+      setVaultItems(updatedItems);
+      const offlineCacheKey = `${VAULT_OFFLINE_CACHE_PREFIX}${coupleData.coupleCode}`;
+      AsyncStorage.setItem(offlineCacheKey, JSON.stringify(serializeVaultItemsForOffline(updatedItems))).catch(() => {});
+    } catch (error) {
+      console.error('Error downloading vault media:', error);
+      setUnavailableItemById((prev) => ({ ...prev, [item.id]: true }));
+      Alert.alert('Download Failed', 'Media is not available right now.');
+    } finally {
+      setDownloadingItemById((prev) => ({ ...prev, [item.id]: false }));
     }
   };
 
@@ -538,14 +660,62 @@ export default function VaultScreen() {
         </TouchableOpacity>
       </View>
       
-      {item.type === 'photo' && item.url && (
-        <Image source={{ uri: item.url }} style={styles.photoPreview} />
+      {item.type === 'photo' && item.media && (
+        item.url && !unavailableItemById[item.id] ? (
+          <Image
+            source={{ uri: item.url }}
+            style={styles.photoPreview}
+            onError={() => setUnavailableItemById((prev) => ({ ...prev, [item.id]: true }))}
+          />
+        ) : downloadingItemById[item.id] ? (
+          <View style={styles.photoPlaceholderCard}>
+            <ActivityIndicator size="small" color="#20bf6b" style={styles.mediaLoadingSpinner} />
+            <Text style={styles.placeholderEmoji}>🖼️</Text>
+            <Text style={styles.mediaInfoText}>Downloading image...</Text>
+          </View>
+        ) : unavailableItemById[item.id] ? (
+          <View style={styles.photoPlaceholderCard}>
+            <Text style={styles.placeholderEmoji}>🖼️</Text>
+            <Text style={styles.mediaUnavailableText}>Not available</Text>
+          </View>
+        ) : (
+          <View style={styles.photoPlaceholderCard}>
+            <Text style={styles.placeholderEmoji}>🖼️</Text>
+            <Text style={styles.mediaInfoText}>Image not downloaded</Text>
+            <TouchableOpacity style={styles.downloadOverlayButton} onPress={() => handleDownloadVaultItem(item)}>
+              <Download size={14} color="#20bf6b" />
+              <Text style={styles.downloadInlineText}>Download</Text>
+            </TouchableOpacity>
+          </View>
+        )
       )}
-      
-      {item.type === 'audio' && item.url && (
-        <View style={{ marginVertical: 10 }}>
-          <AudioPlayer audioUrl={item.url} duration={item.duration} />
-        </View>
+
+      {item.type === 'audio' && item.media && (
+        item.url && !unavailableItemById[item.id] ? (
+          <View style={{ marginVertical: 10 }}>
+            <AudioPlayer audioUrl={item.url} duration={item.duration} />
+          </View>
+        ) : downloadingItemById[item.id] ? (
+          <View style={styles.voicePlaceholderCard}>
+            <ActivityIndicator size="small" color="#20bf6b" style={styles.mediaLoadingSpinner} />
+            <Mic size={18} color="#20bf6b" />
+            <Text style={styles.mediaInfoText}>Downloading audio...</Text>
+          </View>
+        ) : unavailableItemById[item.id] ? (
+          <View style={styles.voicePlaceholderCard}>
+            <Mic size={18} color="#20bf6b" />
+            <Text style={styles.mediaUnavailableText}>Not available</Text>
+          </View>
+        ) : (
+          <View style={styles.voicePlaceholderCard}>
+            <Mic size={18} color="#20bf6b" />
+            <Text style={styles.mediaInfoText}>Voice note not downloaded</Text>
+            <TouchableOpacity style={styles.downloadInlineButton} onPress={() => handleDownloadVaultItem(item)}>
+              <Download size={16} color="#20bf6b" />
+              <Text style={styles.downloadInlineText}>Download</Text>
+            </TouchableOpacity>
+          </View>
+        )
       )}
 
       {item.content && (
@@ -690,8 +860,9 @@ export default function VaultScreen() {
             ]}
           >
             <TouchableOpacity 
-              style={styles.addButton}
+              style={[styles.addButton, isUploadingMedia && styles.addButtonDisabled]}
               onPress={() => handleAddItem('letter')}
+              disabled={isUploadingMedia}
             >
               <LinearGradient
                 colors={['#a29bfe', '#6c5ce7']}
@@ -703,8 +874,9 @@ export default function VaultScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity 
-              style={styles.addButton}
+              style={[styles.addButton, isUploadingMedia && styles.addButtonDisabled]}
               onPress={() => handleAddItem('photo')}
+              disabled={isUploadingMedia}
             >
               <LinearGradient
                 colors={['#00b894', '#00a085']}
@@ -716,8 +888,9 @@ export default function VaultScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity 
-              style={styles.addButton}
+              style={[styles.addButton, isUploadingMedia && styles.addButtonDisabled]}
               onPress={() => handleAddItem('audio')}
+              disabled={isUploadingMedia}
             >
               <LinearGradient
                 colors={['#e17055', '#d63031']}
@@ -738,7 +911,7 @@ export default function VaultScreen() {
           <LinearGradient colors={['#a29bfe', '#6c5ce7']} style={styles.container}>
             <SafeAreaView style={styles.modalSafeArea}>
               <View style={styles.modalHeader}>
-                <TouchableOpacity onPress={() => setShowLetterModal(false)}>
+                <TouchableOpacity onPress={() => setShowLetterModal(false)} disabled={isUploadingLetter || isUploadingMedia}>
                   <X size={24} color="#ffffff" />
                 </TouchableOpacity>
                 <Text style={styles.modalTitle}>Write Letter 💌</Text>
@@ -785,15 +958,15 @@ export default function VaultScreen() {
           <LinearGradient colors={['#e17055', '#d63031']} style={styles.container}>
             <SafeAreaView style={styles.modalSafeArea}>
               <View style={styles.modalHeader}>
-                <TouchableOpacity onPress={() => setShowAudioModal(false)}>
+                <TouchableOpacity onPress={() => setShowAudioModal(false)} disabled={isUploadingMedia}>
                   <X size={24} color="#ffffff" />
                 </TouchableOpacity>
                 <Text style={styles.modalTitle}>Record Voice Memo 🎤</Text>
                 <TouchableOpacity 
                   onPress={currentRecordingUri ? saveAudio : () => {}}
-                  disabled={!currentRecordingUri}
+                  disabled={!currentRecordingUri || isUploadingMedia}
                 >
-                  <Send size={24} color={currentRecordingUri ? '#ffffff' : '#cccccc'} />
+                  <Send size={24} color={currentRecordingUri && !isUploadingMedia ? '#ffffff' : '#cccccc'} />
                 </TouchableOpacity>
               </View>
 
@@ -814,6 +987,7 @@ export default function VaultScreen() {
                     <TouchableOpacity 
                       style={styles.recordButton}
                       onPress={startRecording}
+                      disabled={isUploadingMedia}
                     >
                       <Mic size={28} color="#ffffff" />
                       <Text style={styles.recordButtonText}>Start Recording</Text>
@@ -822,6 +996,7 @@ export default function VaultScreen() {
                     <TouchableOpacity 
                       style={[styles.recordButton, styles.stopButton]}
                       onPress={stopRecording}
+                      disabled={isUploadingMedia}
                     >
                       <Text style={styles.recordButtonText}>Stop</Text>
                     </TouchableOpacity>
@@ -830,6 +1005,18 @@ export default function VaultScreen() {
               </View>
             </SafeAreaView>
           </LinearGradient>
+        </Modal>
+
+        <Modal visible={isUploadingMedia} transparent animationType="fade">
+          <View style={styles.uploadOverlay}>
+            <View style={styles.uploadOverlayCard}>
+              <ActivityIndicator size="large" color="#ff6b9d" />
+              <Text style={styles.uploadOverlayTitle}>
+                {uploadingMediaKind === 'audio' ? 'Sending voice memo...' : 'Sending photo...'}
+              </Text>
+              <Text style={styles.uploadOverlaySubtitle}>Please wait until upload finishes.</Text>
+            </View>
+          </View>
         </Modal>
 
         {/* Options Modal */}
@@ -1060,6 +1247,80 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 12,
   },
+  downloadInlineButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#b7f2d6',
+    borderRadius: 12,
+    paddingVertical: 12,
+    gap: 8,
+    marginBottom: 12,
+    backgroundColor: '#f8fffb',
+  },
+  downloadOverlayButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.76)',
+  },
+  photoPlaceholderCard: {
+    width: '100%',
+    height: 200,
+    borderRadius: 12,
+    marginBottom: 12,
+    backgroundColor: '#fff7fb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  voicePlaceholderCard: {
+    borderRadius: 12,
+    minHeight: 64,
+    marginBottom: 12,
+    backgroundColor: '#fff7fb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+  },
+  placeholderEmoji: {
+    fontSize: 28,
+  },
+  mediaLoadingSpinner: {
+    marginBottom: 2,
+  },
+  downloadInlineText: {
+    fontSize: 13,
+    fontFamily: 'Inter-SemiBold',
+    color: '#20bf6b',
+  },
+  mediaInfoBox: {
+    borderRadius: 12,
+    minHeight: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff7fb',
+    marginBottom: 12,
+  },
+  mediaInfoText: {
+    fontSize: 13,
+    fontFamily: 'Inter-Medium',
+    color: '#b56f8a',
+  },
+  mediaUnavailableText: {
+    fontSize: 13,
+    fontFamily: 'Inter-SemiBold',
+    color: '#c0392b',
+  },
   vaultItemPreview: {
     fontSize: 14,
     fontFamily: 'Inter-Regular',
@@ -1115,6 +1376,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     paddingTop: 16,
+  addButtonDisabled: {
+    opacity: 0.45,
+  },
     borderTopWidth: 1,
     borderTopColor: '#f1f3f4',
   },
@@ -1287,6 +1551,35 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter-SemiBold',
     color: '#ffffff',
     marginLeft: 12,
+  },
+  uploadOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  uploadOverlayCard: {
+    width: '100%',
+    maxWidth: 320,
+    borderRadius: 16,
+    backgroundColor: '#ffffff',
+    paddingVertical: 24,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+  },
+  uploadOverlayTitle: {
+    marginTop: 12,
+    fontSize: 16,
+    fontFamily: 'Inter-SemiBold',
+    color: '#333',
+  },
+  uploadOverlaySubtitle: {
+    marginTop: 6,
+    fontSize: 13,
+    fontFamily: 'Inter-Regular',
+    color: '#666',
+    textAlign: 'center',
   },
   optionsModalOverlay: {
     flex: 1,

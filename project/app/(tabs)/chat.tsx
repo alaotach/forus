@@ -12,10 +12,11 @@ import {
   Animated,
   Alert,
   Modal,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Send, Heart, Camera, Mic, X, Play, Pause, Square, MoreVertical, CheckCheck, Check, Pin, Reply, Copy, Pencil, Trash2 } from 'lucide-react-native';
+import { Send, Heart, Camera, Mic, X, Play, Pause, Square, MoreVertical, CheckCheck, Check, Pin, Reply, Copy, Pencil, Trash2, Download } from 'lucide-react-native';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
 import * as Haptics from 'expo-haptics';
 import { useCouple } from '@/hooks/useCouple';
@@ -37,11 +38,82 @@ import { db } from '@/services/firebase';
 import { ChatMessage } from '@/types/app';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { uploadPhotoMedia, uploadAudioMedia } from '@/services/mediaUpload';
-import { getSignedMediaUrl, streamAndCacheMedia, getCachedFile } from '@/services/media';
+import { streamAndCacheMedia, getCachedFile } from '@/services/media';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useAudioPlayer, useAudioRecorder, AudioSource } from 'expo-audio';
 import * as Audio from 'expo-audio';
 import EmojiSelector from 'react-native-emoji-selector';
+
+const CHAT_OFFLINE_CACHE_PREFIX = 'chat_offline_v1:';
+const CHAT_PENDING_RETRY_PREFIX = 'chat_pending_retry_v1:';
+
+type PendingChatMessage = ChatMessage & {
+  _sending?: boolean;
+  _failed?: boolean;
+  _tempId?: string;
+  _retryUpload?: boolean;
+  _localMediaUri?: string;
+  _mediaType?: 'image' | 'audio';
+};
+
+function toTimestampLike(ms?: number) {
+  const safeMs = Number.isFinite(ms) ? Number(ms) : Date.now();
+  return {
+    toDate: () => new Date(safeMs),
+    seconds: Math.floor(safeMs / 1000),
+    nanoseconds: 0,
+  } as any;
+}
+
+function toMillis(input: any): number {
+  try {
+    if (input?.toDate) {
+      return new Date(input.toDate()).getTime();
+    }
+    if (typeof input?.seconds === 'number') {
+      return input.seconds * 1000;
+    }
+    if (typeof input === 'string' || typeof input === 'number') {
+      const parsed = new Date(input).getTime();
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  } catch {
+    // fallback below
+  }
+  return Date.now();
+}
+
+function serializeMessagesForOffline(messages: ChatMessage[]) {
+  return messages.map((message) => ({
+    ...message,
+    timestampMs: toMillis((message as any).timestamp),
+    replyTo: message.replyTo
+      ? {
+          ...message.replyTo,
+        }
+      : message.replyTo,
+    readAtMs: (message as any).readAt ? toMillis((message as any).readAt) : undefined,
+  }));
+}
+
+function deserializeMessagesFromOffline(raw: any[]): ChatMessage[] {
+  return (raw || []).map((message) => {
+    const restored: any = {
+      ...message,
+      timestamp: toTimestampLike(message.timestampMs),
+    };
+
+    if (message.readAtMs) {
+      restored.readAt = toTimestampLike(message.readAtMs);
+    }
+
+    delete restored.timestampMs;
+    delete restored.readAtMs;
+
+    return restored as ChatMessage;
+  });
+}
 
 export default function ChatScreen() {
   const { coupleData, isConnected, isLoading } = useCouple();
@@ -65,8 +137,13 @@ export default function ChatScreen() {
   const [playingAudio, setPlayingAudio] = useState<{ [key: string]: any }>({});
   const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
-  const [pendingMessages, setPendingMessages] = useState<(ChatMessage & { _sending?: boolean; _failed?: boolean; _tempId?: string })[]>([]);
+  const [downloadingMediaByMessageId, setDownloadingMediaByMessageId] = useState<Record<string, boolean>>({});
+  const [unavailableMediaByMessageId, setUnavailableMediaByMessageId] = useState<Record<string, boolean>>({});
+  const [uploadingMediaKind, setUploadingMediaKind] = useState<'image' | 'audio' | null>(null);
+  const [pendingMessages, setPendingMessages] = useState<PendingChatMessage[]>([]);
   const tempIdCounter = useRef(0);
+  const uploadedLocalMediaPathByFileKeyRef = useRef<Record<string, string>>({});
+  const autoRetryInProgressRef = useRef<Set<string>>(new Set());
   const flatListRef = useRef<FlatList>(null);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const mounted = useRef(true);
@@ -76,6 +153,7 @@ export default function ChatScreen() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [audioPermission, setAudioPermission] = useState<boolean>(false);
   const QUICK_REACTIONS = ['❤️', '😍', '😂', '😮', '😢', '🙏'];
+  const isUploadingOutgoingMedia = uploadingMediaKind !== null;
 
   // Audio recorder setup with modern Expo Audio
   const recorder = useAudioRecorder({
@@ -154,10 +232,93 @@ export default function ChatScreen() {
     }
   };
 
+  const serializePendingForOffline = (items: PendingChatMessage[]) => {
+    return items
+      .filter((item) => item._failed || item._sending)
+      .map((item) => ({
+        id: item.id,
+        _tempId: item._tempId,
+        _failed: true,
+        _sending: false,
+        _retryUpload: item._retryUpload || false,
+        _localMediaUri: item._localMediaUri || null,
+        _mediaType: item._mediaType || null,
+        sender: item.sender,
+        message: item.message,
+        timestampMs: toMillis(item.timestamp),
+        reactions: item.reactions || {},
+        readBy: Array.isArray(item.readBy) ? item.readBy : [],
+        type: item.type,
+        media: item.media || null,
+        mediaUrl: item.mediaUrl || null,
+      }));
+  };
+
+  const deserializePendingFromOffline = (raw: any[]): PendingChatMessage[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((item) => ({
+      id: String(item.id || `_tmp_${Date.now()}`),
+      _tempId: item._tempId ? String(item._tempId) : String(item.id || `_tmp_${Date.now()}`),
+      _failed: true,
+      _sending: false,
+      _retryUpload: Boolean(item._retryUpload),
+      _localMediaUri: item._localMediaUri ? String(item._localMediaUri) : undefined,
+      _mediaType: item._mediaType === 'audio' ? 'audio' : item._mediaType === 'image' ? 'image' : undefined,
+      sender: String(item.sender || ''),
+      message: String(item.message || ''),
+      timestamp: toTimestampLike(typeof item.timestampMs === 'number' ? item.timestampMs : Date.now()),
+      reactions: item.reactions && typeof item.reactions === 'object' ? item.reactions : {},
+      readBy: Array.isArray(item.readBy) ? item.readBy : [],
+      type: item.type || 'text',
+      media: item.media || undefined,
+      mediaUrl: item.mediaUrl || undefined,
+    })) as PendingChatMessage[];
+  };
+
+  useEffect(() => {
+    if (!coupleData?.coupleCode) return;
+    const pendingCacheKey = `${CHAT_PENDING_RETRY_PREFIX}${coupleData.coupleCode}`;
+    const serialized = serializePendingForOffline(pendingMessages);
+    if (serialized.length === 0) {
+      AsyncStorage.removeItem(pendingCacheKey).catch(() => undefined);
+      return;
+    }
+    AsyncStorage.setItem(pendingCacheKey, JSON.stringify(serialized)).catch(() => undefined);
+  }, [pendingMessages, coupleData?.coupleCode]);
+
   const setupChat = () => {
     if (!coupleData || !mounted.current) return;
 
     console.log('Setting up chat for couple:', coupleData.coupleCode);
+    const offlineCacheKey = `${CHAT_OFFLINE_CACHE_PREFIX}${coupleData.coupleCode}`;
+    const pendingCacheKey = `${CHAT_PENDING_RETRY_PREFIX}${coupleData.coupleCode}`;
+
+    // Render cached timeline immediately for cold-start offline behavior.
+    AsyncStorage.getItem(offlineCacheKey)
+      .then((raw) => {
+        if (!raw || !mounted.current) return;
+        const parsed = JSON.parse(raw);
+        const restored = deserializeMessagesFromOffline(parsed);
+        if (restored.length > 0) {
+          setMessages(restored);
+        }
+      })
+      .catch((error) => {
+        console.log('Chat offline cache read skipped:', error?.message || error);
+      });
+
+    AsyncStorage.getItem(pendingCacheKey)
+      .then((raw) => {
+        if (!raw || !mounted.current) return;
+        const parsed = JSON.parse(raw);
+        const restored = deserializePendingFromOffline(parsed);
+        if (restored.length > 0) {
+          setPendingMessages(restored);
+        }
+      })
+      .catch((error) => {
+        console.log('Chat pending retry cache read skipped:', error?.message || error);
+      });
 
     const messagesRef = collection(db, 'couples', coupleData.coupleCode, 'chat');
     const q = query(messagesRef, orderBy('timestamp', 'asc'));
@@ -178,24 +339,16 @@ export default function ChatScreen() {
 
           if (message.media?.mediaId) {
             try {
-              if (Platform.OS !== 'web' && message.media.fileKey) {
+              if (message.media.fileKey) {
                 const cachedPath = await getCachedFile(message.media.fileKey);
                 if (cachedPath) {
                   hydrated.mediaUrl = cachedPath;
-                } else {
-                  const cachedMedia = await streamAndCacheMedia(
-                    message.media.mediaId,
-                    coupleData.coupleCode,
-                    coupleData.nickname
-                  );
-                  hydrated.mediaUrl = cachedMedia.localPath;
+                } else if (message.sender === coupleData.nickname) {
+                  const localPath = uploadedLocalMediaPathByFileKeyRef.current[message.media.fileKey];
+                  if (localPath) {
+                    hydrated.mediaUrl = localPath;
+                  }
                 }
-              } else {
-                hydrated.mediaUrl = await getSignedMediaUrl(
-                  message.media.mediaId,
-                  coupleData.coupleCode,
-                  coupleData.nickname
-                );
               }
             } catch {
               hydrated.mediaUrl = message.mediaUrl || null;
@@ -206,24 +359,11 @@ export default function ChatScreen() {
             try {
               let replyMediaUrl: string;
 
-              if (Platform.OS !== 'web' && message.replyTo.media.fileKey) {
+              if (message.replyTo.media.fileKey) {
                 const cachedReplyPath = await getCachedFile(message.replyTo.media.fileKey);
                 if (cachedReplyPath) {
                   replyMediaUrl = cachedReplyPath;
-                } else {
-                  const cachedReply = await streamAndCacheMedia(
-                    message.replyTo.media.mediaId,
-                    coupleData.coupleCode,
-                    coupleData.nickname
-                  );
-                  replyMediaUrl = cachedReply.localPath;
                 }
-              } else {
-                replyMediaUrl = await getSignedMediaUrl(
-                  message.replyTo.media.mediaId,
-                  coupleData.coupleCode,
-                  coupleData.nickname
-                );
               }
 
               hydrated.replyTo = {
@@ -241,6 +381,9 @@ export default function ChatScreen() {
 
       console.log('Loaded messages:', messagesData.length);
       setMessages(messagesData);
+      AsyncStorage.setItem(offlineCacheKey, JSON.stringify(serializeMessagesForOffline(messagesData))).catch((error) => {
+        console.log('Chat offline cache write skipped:', error?.message || error);
+      });
       markIncomingMessagesAsRead(messagesData).catch((error) => {
         console.error('Error marking messages as read:', error);
       });
@@ -366,10 +509,8 @@ export default function ChatScreen() {
 
     // Show immediately, clear input
     setPendingMessages(prev => [...prev, optimisticMsg]);
-    if (!mediaUrl) {
-      setInputText('');
-      setReplyingTo(null);
-    }
+    setInputText('');
+    setReplyingTo(null);
 
     // Scroll to bottom
     setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 50);
@@ -558,6 +699,7 @@ export default function ChatScreen() {
   };
 
   const openCamera = async () => {
+    if (isUploadingOutgoingMedia) return;
     if (!cameraPermission?.granted) {
       const permission = await requestCameraPermission();
       if (!permission.granted) {
@@ -603,6 +745,7 @@ export default function ChatScreen() {
   };
 
   const pickImage = async () => {
+    if (isUploadingOutgoingMedia) return;
     Alert.alert(
       'Send Photo',
       'Choose how you want to send this image.',
@@ -624,6 +767,7 @@ export default function ChatScreen() {
   };
 
   const startRecording = async () => {
+    if (isUploadingOutgoingMedia) return;
     try {
       if (!recorder) {
         Alert.alert('Error', 'Recorder not available');
@@ -678,9 +822,10 @@ export default function ChatScreen() {
   };
 
   const uploadAndSendMedia = async (uri: string, type: 'image' | 'audio') => {
-    if (!coupleData) return;
+    if (!coupleData || isUploadingOutgoingMedia) return;
 
     try {
+      setUploadingMediaKind(type);
       let uploadedMedia;
       
       if (type === 'image') {
@@ -695,17 +840,164 @@ export default function ChatScreen() {
         });
       }
 
+      if (uploadedMedia?.fileKey) {
+        uploadedLocalMediaPathByFileKeyRef.current[uploadedMedia.fileKey] = uri;
+      }
+
       // Send the message with media reference only (no persisted URL)
       await sendMessage(
         type === 'image' ? '📸 Photo' : '🎵 Voice message',
-        undefined,
+        uri,
         type,
         null,
         uploadedMedia
       );
     } catch (error) {
       console.error('Error uploading media:', error);
-      Alert.alert('Upload Failed', 'Failed to upload media. Please try again.');
+      const nowMs = Date.now();
+      const tempId = `_tmp_${nowMs}_${++tempIdCounter.current}`;
+      const failedMediaMessage: PendingChatMessage = {
+        id: tempId,
+        _tempId: tempId,
+        _sending: false,
+        _failed: true,
+        _retryUpload: true,
+        _localMediaUri: uri,
+        _mediaType: type,
+        sender: coupleData.nickname,
+        message: type === 'image' ? '📸 Photo' : '🎵 Voice message',
+        timestamp: toTimestampLike(nowMs),
+        reactions: {},
+        readBy: [coupleData.nickname],
+        type,
+        mediaUrl: uri,
+      };
+      setPendingMessages((prev) => [...prev, failedMediaMessage]);
+      Alert.alert('Upload Failed', 'Media saved locally. Tap retry on the failed bubble to send again.');
+    } finally {
+      setUploadingMediaKind(null);
+    }
+  };
+
+  const retryFailedMessage = async (failedMessage: PendingChatMessage, options?: { silent?: boolean }) => {
+    if (!coupleData || !failedMessage._failed) return;
+
+    if (failedMessage._retryUpload && failedMessage._localMediaUri && failedMessage._mediaType) {
+      try {
+        setPendingMessages((prev) =>
+          prev.map((m) =>
+            m._tempId === failedMessage._tempId ? { ...m, _failed: false, _sending: true } : m
+          )
+        );
+
+        setUploadingMediaKind(failedMessage._mediaType);
+        const uploadedMedia =
+          failedMessage._mediaType === 'image'
+            ? await uploadPhotoMedia(failedMessage._localMediaUri, {
+                userId: coupleData.nickname,
+                coupleCode: coupleData.coupleCode,
+              })
+            : await uploadAudioMedia(failedMessage._localMediaUri, {
+                userId: coupleData.nickname,
+                coupleCode: coupleData.coupleCode,
+              });
+
+        if (uploadedMedia?.fileKey) {
+          uploadedLocalMediaPathByFileKeyRef.current[uploadedMedia.fileKey] = failedMessage._localMediaUri;
+        }
+
+        setPendingMessages((prev) => prev.filter((m) => m._tempId !== failedMessage._tempId));
+        await sendMessage(
+          failedMessage.message,
+          failedMessage._localMediaUri,
+          failedMessage._mediaType,
+          null,
+          uploadedMedia
+        );
+      } catch (error) {
+        console.error('Retry upload failed:', error);
+        setPendingMessages((prev) =>
+          prev.map((m) =>
+            m._tempId === failedMessage._tempId ? { ...m, _failed: true, _sending: false } : m
+          )
+        );
+        if (!options?.silent) {
+          Alert.alert('Retry Failed', 'Still unable to send this media. Please try again.');
+        }
+      } finally {
+        setUploadingMediaKind(null);
+      }
+      return;
+    }
+
+    setPendingMessages((prev) => prev.filter((m) => m._tempId !== failedMessage._tempId));
+    await sendMessage(
+      failedMessage.message,
+      failedMessage.mediaUrl,
+      failedMessage.type as 'image' | 'audio' | undefined,
+      null,
+      failedMessage.media || undefined
+    );
+  };
+
+  useEffect(() => {
+    if (!isConnected || !coupleData || isUploadingOutgoingMedia) return;
+
+    const failedMine = pendingMessages.filter(
+      (item) => item._failed && item.sender === coupleData.nickname
+    );
+    if (failedMine.length === 0) return;
+
+    let cancelled = false;
+
+    const runAutoRetry = async () => {
+      for (const failedMessage of failedMine) {
+        if (cancelled || !mounted.current) return;
+        const retryKey = failedMessage._tempId || failedMessage.id;
+        if (autoRetryInProgressRef.current.has(retryKey)) continue;
+
+        autoRetryInProgressRef.current.add(retryKey);
+        try {
+          await retryFailedMessage(failedMessage, { silent: true });
+        } finally {
+          autoRetryInProgressRef.current.delete(retryKey);
+        }
+      }
+    };
+
+    runAutoRetry();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isConnected, coupleData?.coupleCode, pendingMessages, isUploadingOutgoingMedia]);
+
+  const downloadMessageMedia = async (message: ChatMessage) => {
+    if (!coupleData || !message.media?.mediaId) return;
+
+    setDownloadingMediaByMessageId((prev) => ({ ...prev, [message.id]: true }));
+    setUnavailableMediaByMessageId((prev) => ({ ...prev, [message.id]: false }));
+
+    try {
+      const cached = await streamAndCacheMedia(
+        message.media.mediaId,
+        coupleData.coupleCode,
+        coupleData.nickname
+      );
+
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === message.id
+            ? { ...item, mediaUrl: cached.localPath }
+            : item
+        )
+      );
+    } catch (error) {
+      console.error('Error downloading message media:', error);
+      setUnavailableMediaByMessageId((prev) => ({ ...prev, [message.id]: true }));
+      Alert.alert('Download Failed', 'Media is not available right now.');
+    } finally {
+      setDownloadingMediaByMessageId((prev) => ({ ...prev, [message.id]: false }));
     }
   };
 
@@ -1148,17 +1440,60 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
               </View>
             )}
 
-            {item.type === 'image' && item.mediaUrl && (
+            {item.type === 'image' && (item.media || item.mediaUrl) && (
               <>
-                <TouchableOpacity
-                  activeOpacity={0.9}
-                  onPress={() => {
-                    setSelectedImageUrl(item.mediaUrl || null);
-                    setSelectedImageMessage(item);
-                  }}
-                >
-                  <Image source={{ uri: item.mediaUrl }} style={styles.messageImage} />
-                </TouchableOpacity>
+                {item.mediaUrl && !unavailableMediaByMessageId[item.id] ? (
+                  <TouchableOpacity
+                    activeOpacity={0.9}
+                    onPress={() => {
+                      setSelectedImageUrl(item.mediaUrl || null);
+                      setSelectedImageMessage(item);
+                    }}
+                  >
+                    <Image
+                      source={{ uri: item.mediaUrl }}
+                      style={styles.messageImage}
+                      onError={() => {
+                        setUnavailableMediaByMessageId((prev) => ({ ...prev, [item.id]: true }));
+                      }}
+                    />
+                  </TouchableOpacity>
+                ) : downloadingMediaByMessageId[item.id] ? (
+                  <View style={styles.mediaImagePlaceholder}>
+                    <ActivityIndicator
+                      size="small"
+                      color={isMyMessage ? '#ffffff' : '#ff6b9d'}
+                      style={styles.mediaLoadingSpinner}
+                    />
+                    <Text style={styles.mediaPlaceholderEmoji}>🖼️</Text>
+                    <Text style={styles.mediaPlaceholderText}>Downloading image...</Text>
+                  </View>
+                ) : unavailableMediaByMessageId[item.id] ? (
+                  <View style={styles.mediaImagePlaceholder}>
+                    <Text style={styles.mediaPlaceholderEmoji}>🖼️</Text>
+                    <Text style={styles.notAvailableText}>Not available</Text>
+                  </View>
+                ) : item.media ? (
+                  <View style={styles.mediaImagePlaceholder}>
+                    <Text style={styles.mediaPlaceholderEmoji}>🖼️</Text>
+                    <Text style={styles.mediaPlaceholderText}>Image not downloaded</Text>
+                    <TouchableOpacity
+                      style={[
+                        styles.mediaOverlayDownloadButton,
+                        isMyMessage ? styles.mediaOverlayDownloadButtonMine : styles.mediaOverlayDownloadButtonTheirs,
+                      ]}
+                      onPress={() => downloadMessageMedia(item)}
+                    >
+                      <Download size={14} color={isMyMessage ? '#ffffff' : '#ff6b9d'} />
+                      <Text style={[styles.mediaOverlayDownloadText, isMyMessage ? styles.myMessageTime : styles.theirMessageTime]}>Download</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <View style={styles.mediaImagePlaceholder}>
+                    <Text style={styles.mediaPlaceholderEmoji}>🖼️</Text>
+                    <Text style={styles.notAvailableText}>Not available</Text>
+                  </View>
+                )}
                 {/* Footer row for image messages (inside the padded bubble) */}
                 <View style={styles.imageMessageFooter}>
                   {item.edited && <Text style={[styles.messageTime, isMyMessage ? styles.myMessageTime : styles.theirMessageTime]}>Edited </Text>}
@@ -1172,7 +1507,12 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
                   {isMyMessage && (() => {
                     const st = getMessageStatus(item as any);
                     if (st === 'Sending') return <Text style={styles.sendingClock}>🕐</Text>;
-                    if (st === 'Failed') return <TouchableOpacity onPress={() => { setPendingMessages(p => p.filter(m => m._tempId !== (item as any)._tempId)); sendMessage(item.message, undefined, item.type as any, null, item.media || undefined); }}><Text style={styles.failedIcon}>⚠️</Text></TouchableOpacity>;
+                    if (st === 'Failed') return (
+                      <TouchableOpacity style={styles.failedRetryWrap} onPress={() => retryFailedMessage(item as PendingChatMessage)}>
+                        <Text style={styles.failedIcon}>⚠️</Text>
+                        <Text style={[styles.failedRetryText, isMyMessage ? styles.myMessageTime : styles.theirMessageTime]}>Retry</Text>
+                      </TouchableOpacity>
+                    );
                     if (st === 'Read') return <CheckCheck size={11} color={isMyMessage ? '#ffffff' : '#888'} />;
                     return <Check size={11} color={isMyMessage ? 'rgba(255,255,255,0.7)' : '#aaa'} />;
                   })()}
@@ -1180,8 +1520,45 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
               </>
             )}
             
-            {item.type === 'audio' && item.mediaUrl && (
-              <AudioMessageBubble item={item} isMyMessage={isMyMessage} />
+            {item.type === 'audio' && (item.media || item.mediaUrl) && (
+              item.mediaUrl && !unavailableMediaByMessageId[item.id] ? (
+                <AudioMessageBubble item={item} isMyMessage={isMyMessage} />
+              ) : downloadingMediaByMessageId[item.id] ? (
+                <View style={styles.mediaAudioPlaceholder}>
+                  <ActivityIndicator
+                    size="small"
+                    color={isMyMessage ? '#ffffff' : '#ff6b9d'}
+                    style={styles.mediaLoadingSpinner}
+                  />
+                  <Mic size={18} color={isMyMessage ? '#ffffff' : '#ff6b9d'} />
+                  <Text style={styles.mediaPlaceholderText}>Downloading audio...</Text>
+                </View>
+              ) : unavailableMediaByMessageId[item.id] ? (
+                <View style={styles.mediaAudioPlaceholder}>
+                  <Mic size={18} color={isMyMessage ? '#ffffff' : '#ff6b9d'} />
+                  <Text style={styles.notAvailableText}>Not available</Text>
+                </View>
+              ) : item.media ? (
+                <View style={styles.mediaAudioPlaceholder}>
+                  <Mic size={18} color={isMyMessage ? '#ffffff' : '#ff6b9d'} />
+                  <Text style={styles.mediaPlaceholderText}>Voice note not downloaded</Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.mediaInlineDownloadButton,
+                      isMyMessage ? styles.mediaOverlayDownloadButtonMine : styles.mediaOverlayDownloadButtonTheirs,
+                    ]}
+                    onPress={() => downloadMessageMedia(item)}
+                  >
+                    <Download size={14} color={isMyMessage ? '#ffffff' : '#ff6b9d'} />
+                    <Text style={[styles.mediaOverlayDownloadText, isMyMessage ? styles.myMessageTime : styles.theirMessageTime]}>Download</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.mediaAudioPlaceholder}>
+                  <Mic size={18} color={isMyMessage ? '#ffffff' : '#ff6b9d'} />
+                  <Text style={styles.notAvailableText}>Not available</Text>
+                </View>
+              )
             )}
             
             {item.type === 'text' && (
@@ -1225,14 +1602,11 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
                 if (status === 'Failed') {
                   return (
                     <TouchableOpacity
-                      style={styles.statusIconWrap}
-                      onPress={() => {
-                        const failedMsg = item as any;
-                        setPendingMessages(prev => prev.filter(m => m._tempId !== failedMsg._tempId));
-                        sendMessage(item.message, undefined, item.type as any, null, item.media || undefined);
-                      }}
+                      style={[styles.statusIconWrap, styles.failedRetryWrap]}
+                      onPress={() => retryFailedMessage(item as PendingChatMessage)}
                     >
                       <Text style={styles.failedIcon}>⚠️</Text>
+                      <Text style={[styles.failedRetryText, isMyMessage ? styles.myMessageTime : styles.theirMessageTime]}>Retry</Text>
                     </TouchableOpacity>
                   );
                 }
@@ -1426,9 +1800,21 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
                 </TouchableOpacity>
               </View>
             )}
+            {isUploadingOutgoingMedia && (
+              <View style={styles.uploadingIndicator}>
+                <ActivityIndicator size="small" color="#ff6b9d" />
+                <Text style={styles.uploadingText}>
+                  {uploadingMediaKind === 'audio' ? 'Sending voice memo...' : 'Sending photo...'}
+                </Text>
+              </View>
+            )}
             
             <View style={styles.inputWrapper}>
-              <TouchableOpacity style={styles.mediaButton} onPress={pickImage}>
+              <TouchableOpacity
+                style={[styles.mediaButton, isUploadingOutgoingMedia && styles.mediaButtonDisabled]}
+                onPress={pickImage}
+                disabled={isUploadingOutgoingMedia || isRecording}
+              >
                 <Camera size={20} color="#ff6b9d" />
               </TouchableOpacity>
               
@@ -1440,13 +1826,14 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
                 onChangeText={setInputText}
                 multiline
                 maxLength={500}
-                editable={!isRecording}
+                editable={!isRecording && !isUploadingOutgoingMedia}
               />
               
               <TouchableOpacity 
-                style={styles.mediaButton} 
+                style={[styles.mediaButton, isUploadingOutgoingMedia && styles.mediaButtonDisabled]} 
                 onPress={isRecording ? stopRecording : startRecording}
                 onLongPress={startRecording}
+                disabled={isUploadingOutgoingMedia}
               >
                 <Mic size={20} color={isRecording ? "#ff6b6b" : "#ff6b9d"} />
               </TouchableOpacity>
@@ -1454,7 +1841,7 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
               <TouchableOpacity
                 style={[styles.sendButton, !inputText.trim() && styles.sendButtonDisabled]}
                 onPress={() => sendMessage()}
-                disabled={!inputText.trim() || isRecording}
+                disabled={!inputText.trim() || isRecording || isUploadingOutgoingMedia}
               >
                 <LinearGradient
                   colors={['#ff6b9d', '#c44569']}
@@ -1759,6 +2146,98 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 4,
   },
+  mediaDownloadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+    marginBottom: 4,
+  },
+  mediaDownloadText: {
+    fontSize: 12,
+    fontFamily: 'Inter-Medium',
+  },
+  mediaImagePlaceholder: {
+    width: 240,
+    maxWidth: '100%',
+    aspectRatio: 1,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    marginBottom: 4,
+  },
+  mediaAudioPlaceholder: {
+    borderRadius: 8,
+    minHeight: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    marginBottom: 4,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  mediaPlaceholderEmoji: {
+    fontSize: 28,
+    marginBottom: 6,
+  },
+  mediaLoadingSpinner: {
+    marginBottom: 4,
+  },
+  mediaOverlayDownloadButton: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: 8,
+  },
+  mediaInlineDownloadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+  },
+  mediaOverlayDownloadButtonMine: {
+    backgroundColor: 'rgba(0,0,0,0.28)',
+  },
+  mediaOverlayDownloadButtonTheirs: {
+    backgroundColor: 'rgba(255,255,255,0.78)',
+  },
+  mediaOverlayDownloadText: {
+    fontSize: 11,
+    fontFamily: 'Inter-SemiBold',
+  },
+  mediaPlaceholderBox: {
+    minHeight: 56,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    marginBottom: 4,
+  },
+  mediaPlaceholderText: {
+    fontSize: 12,
+    fontFamily: 'Inter-Medium',
+    color: '#ffffff',
+  },
+  notAvailableText: {
+    fontSize: 12,
+    fontFamily: 'Inter-Medium',
+    color: '#ffe6ee',
+  },
   imageMessageFooter: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1934,6 +2413,15 @@ const styles = StyleSheet.create({
     fontSize: 10,
     lineHeight: 13,
   },
+  failedRetryWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  failedRetryText: {
+    fontSize: 10,
+    fontFamily: 'Inter-SemiBold',
+  },
   messageTimeFaded: {
     opacity: 0.5,
   },
@@ -2092,6 +2580,20 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter-Medium',
     color: '#ff6b6b',
   },
+  uploadingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#fff1f7',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+  },
+  uploadingText: {
+    fontSize: 14,
+    fontFamily: 'Inter-Medium',
+    color: '#c44569',
+  },
   stopRecordingButton: {
     padding: 4,
   },
@@ -2107,6 +2609,9 @@ const styles = StyleSheet.create({
   mediaButton: {
     padding: 8,
     marginHorizontal: 4,
+  },
+  mediaButtonDisabled: {
+    opacity: 0.45,
   },
   textInput: {
     flex: 1,

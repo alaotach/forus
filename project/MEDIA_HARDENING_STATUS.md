@@ -113,7 +113,7 @@ Legend:
 - [ ] Media proxy hard mode (fully hide S3 semantics)
 - [ ] End-to-end encryption for media
 - [ ] Background prefetching
-- [ ] Offline mode support
+- [~] Offline mode support: cold-start timeline persistence added for chat/vault; full app-wide offline parity still pending
 - [ ] Media deduplication
 
 ## Immediate Priority Order
