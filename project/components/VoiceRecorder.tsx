@@ -5,9 +5,11 @@ import {
   TouchableOpacity,
   StyleSheet,
   Animated,
+  Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Mic, Square, Send } from 'lucide-react-native';
+import { Mic, Square, Send, Pause, Play } from 'lucide-react-native';
 import { useAudioRecorder } from 'expo-audio';
 import * as Audio from 'expo-audio';
 
@@ -19,6 +21,7 @@ interface VoiceRecorderProps {
 
 export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible }: VoiceRecorderProps) {
   const [isRecording, setIsRecording] = useState(false);
+  const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [audioPermission, setAudioPermission] = useState<boolean>(false);
   const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
@@ -63,7 +66,7 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
   }, []);
 
   useEffect(() => {
-    if (isRecording) {
+    if (isRecording && !isRecordingPaused) {
       // Start pulsing animation
       Animated.loop(
         Animated.sequence([
@@ -82,33 +85,73 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
     } else {
       pulseAnim.setValue(1);
     }
-  }, [isRecording]);
+  }, [isRecording, isRecordingPaused]);
 
   const requestAudioPermission = async () => {
     try {
-      // In expo-audio SDK 52, there is no generic permissions fetcher on recorder.
-      // But we can check via Audio.requestPermissionsAsync() if it exists.
-      // If not, we fall back to granting it, if device OS asks lazily.
-      setAudioPermission(true);
+      if (Platform.OS === 'android') {
+        const androidPermission = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message: 'Forus needs microphone access to record voice messages.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Deny',
+          }
+        );
+
+        if (androidPermission !== PermissionsAndroid.RESULTS.GRANTED) {
+          setAudioPermission(false);
+          return false;
+        }
+      }
+
+      const requestRecordingPermissions =
+        (Audio as any)?.requestRecordingPermissionsAsync ||
+        (Audio as any)?.requestPermissionsAsync;
+
+      if (typeof requestRecordingPermissions === 'function') {
+        const permission = await requestRecordingPermissions();
+        const granted = permission?.granted === true || permission?.status === 'granted';
+        if (!granted) {
+          setAudioPermission(false);
+          return false;
+        }
+      }
+
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
       });
+      setAudioPermission(true);
+      return true;
     } catch (error) {
       console.error('Error requesting audio permission:', error);
-      setAudioPermission(true); // Attempt blindly if setAudioModeAsync fails
+      setAudioPermission(false);
+      return false;
     }
   };
 
   const startRecording = async () => {
-    if (!audioPermission) return;
+    const hasPermission = audioPermission || await requestAudioPermission();
+    if (!hasPermission) return;
 
     try {
       if (recorder) {
+        if (isRecording && isRecordingPaused) {
+          recorder.record();
+          setIsRecordingPaused(false);
+          recordingTimer.current = setInterval(() => {
+            setRecordingDuration(prev => prev + 1);
+          }, 1000);
+          return;
+        }
+
         await recorder.prepareToRecordAsync();
         recorder.record();
         
         setIsRecording(true);
+        setIsRecordingPaused(false);
         setRecordingDuration(0);
 
         // Start timer
@@ -118,6 +161,27 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
       }
     } catch (error) {
       console.error('Error starting recording:', error);
+    }
+  };
+
+  const pauseRecording = async () => {
+    if (!recorder || !isRecording || isRecordingPaused) return;
+
+    try {
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
+        recordingTimer.current = null;
+      }
+
+      if (typeof (recorder as any).pause === 'function') {
+        await (recorder as any).pause();
+      } else {
+        await recorder.stop();
+      }
+
+      setIsRecordingPaused(true);
+    } catch (error) {
+      console.error('Error pausing recording:', error);
     }
   };
 
@@ -133,6 +197,7 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
 
       await recorder.stop();
       setCurrentRecordingUri(recorder.uri || null);
+      setIsRecordingPaused(false);
     } catch (error) {
       console.error('Error stopping recording:', error);
     }
@@ -148,6 +213,7 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
     }
     
     setIsRecording(false);
+    setIsRecordingPaused(false);
     setRecordingDuration(0);
     setCurrentRecordingUri(null);
     
@@ -167,6 +233,7 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
       setRecordingDuration(0);
       setCurrentRecordingUri(null);
       setIsRecording(false);
+      setIsRecordingPaused(false);
       onCancel();
     }
   };
@@ -191,8 +258,8 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
           {isRecording && (
             <View style={styles.recordingInfo}>
               <View style={styles.recordingIndicator}>
-                <View style={styles.recordingDot} />
-                <Text style={styles.recordingText}>Recording...</Text>
+                {!isRecordingPaused && <View style={styles.recordingDot} />}
+                <Text style={styles.recordingText}>{isRecordingPaused ? 'Paused' : 'Recording...'}</Text>
               </View>
               <Text style={styles.durationText}>{formatDuration(recordingDuration)}</Text>
             </View>
@@ -208,13 +275,15 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
           >
             <TouchableOpacity
               style={styles.recordButtonInner}
-              onPress={isRecording ? stopRecording : startRecording}
+              onPress={!isRecording ? startRecording : (isRecordingPaused ? startRecording : pauseRecording)}
               disabled={!audioPermission}
             >
-              {isRecording ? (
-                <Square size={32} color="#ffffff" fill="#ffffff" />
-              ) : (
+              {!isRecording ? (
                 <Mic size={32} color="#ffffff" />
+              ) : isRecordingPaused ? (
+                <Play size={32} color="#ffffff" />
+              ) : (
+                <Pause size={32} color="#ffffff" />
               )}
             </TouchableOpacity>
           </Animated.View>
@@ -223,6 +292,13 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
             <TouchableOpacity style={styles.cancelButton} onPress={cancelRecording}>
               <Text style={styles.cancelButtonText}>Cancel</Text>
             </TouchableOpacity>
+
+            {isRecording && (
+              <TouchableOpacity style={styles.stopButton} onPress={stopRecording}>
+                <Square size={16} color="#ffffff" fill="#ffffff" />
+                <Text style={styles.stopButtonText}>Stop</Text>
+              </TouchableOpacity>
+            )}
             
             {!isRecording && currentRecordingUri && (
               <TouchableOpacity style={styles.sendButton} onPress={sendRecording}>
@@ -328,6 +404,21 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  stopButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 80, 80, 0.45)',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginRight: 10,
+  },
+  stopButtonText: {
+    fontSize: 16,
+    fontFamily: 'Inter-Medium',
+    color: '#ffffff',
+    marginLeft: 8,
   },
   sendButtonText: {
     fontSize: 16,

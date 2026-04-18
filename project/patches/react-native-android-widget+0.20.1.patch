@@ -1,0 +1,204 @@
+diff --git a/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/builder/widget/ImageWidget.java b/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/builder/widget/ImageWidget.java
+index 4f5ca01..45ee36f 100644
+--- a/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/builder/widget/ImageWidget.java
++++ b/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/builder/widget/ImageWidget.java
+@@ -1,6 +1,8 @@
+ package com.reactnativeandroidwidget.builder.widget;
+ 
+ import android.graphics.Bitmap;
++import android.graphics.Canvas;
++import android.graphics.Rect;
+ import android.widget.ImageView;
+ 
+ import androidx.core.graphics.drawable.RoundedBitmapDrawable;
+@@ -37,6 +39,7 @@ public class ImageWidget extends BaseWidget<ImageView> {
+         }
+ 
+         view.setImageDrawable(bitmapDrawable);
++        view.setScaleType(ImageView.ScaleType.CENTER_CROP);
+     }
+ 
+     private Bitmap getBitmapFromURL(String src, int width, int height) {
+@@ -45,10 +48,42 @@ public class ImageWidget extends BaseWidget<ImageView> {
+             if (bitmap == null) {
+                 return null;
+             }
+-            return Bitmap.createScaledBitmap(bitmap, width, height, true);
++            return centerCropBitmap(bitmap, width, height);
+         } catch (IOException e) {
+             e.printStackTrace();
+             return null;
+         }
+     }
++
++    private Bitmap centerCropBitmap(Bitmap source, int targetWidth, int targetHeight) {
++        if (source == null || targetWidth <= 0 || targetHeight <= 0) {
++            return source;
++        }
++
++        float sourceWidth = source.getWidth();
++        float sourceHeight = source.getHeight();
++
++        float sourceAspect = sourceWidth / sourceHeight;
++        float targetAspect = (float) targetWidth / (float) targetHeight;
++
++        int cropX = 0;
++        int cropY = 0;
++        int cropWidth = source.getWidth();
++        int cropHeight = source.getHeight();
++
++        if (sourceAspect > targetAspect) {
++            cropWidth = Math.round(sourceHeight * targetAspect);
++            cropX = (source.getWidth() - cropWidth) / 2;
++        } else if (sourceAspect < targetAspect) {
++            cropHeight = Math.round(sourceWidth / targetAspect);
++            cropY = (source.getHeight() - cropHeight) / 2;
++        }
++
++        Bitmap output = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888);
++        Canvas canvas = new Canvas(output);
++        Rect srcRect = new Rect(cropX, cropY, cropX + cropWidth, cropY + cropHeight);
++        Rect dstRect = new Rect(0, 0, targetWidth, targetHeight);
++        canvas.drawBitmap(source, srcRect, dstRect, null);
++        return output;
++    }
+ }
+diff --git a/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/oss/HeadlessJsTaskWorker.java b/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/oss/HeadlessJsTaskWorker.java
+index 269a75d..6470a5b 100644
+--- a/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/oss/HeadlessJsTaskWorker.java
++++ b/node_modules/react-native-android-widget/android/src/main/java/com/reactnativeandroidwidget/oss/HeadlessJsTaskWorker.java
+@@ -34,6 +34,8 @@ import androidx.work.WorkerParameters;
+ 
+ import com.facebook.react.ReactApplication;
+ import com.facebook.react.ReactHost;
++import com.facebook.react.ReactInstanceManager;
++import com.facebook.react.ReactNativeHost;
+ import com.facebook.react.ReactInstanceEventListener;
+ import com.facebook.react.bridge.ReactContext;
+ import com.facebook.react.bridge.UiThreadUtil;
+@@ -71,22 +73,69 @@ public abstract class HeadlessJsTaskWorker extends ListenableWorker implements H
+     protected abstract HeadlessJsTaskConfig getTaskConfig(Data data);
+ 
+     protected void startTask(final HeadlessJsTaskConfig taskConfig) {
++        if (startTaskWithReactNativeHost(taskConfig)) {
++            return;
++        }
++
+         ReactHost reactHost = this.getReactHost();
++        if (reactHost == null) {
++            if (this.mCompleter != null) {
++                this.mCompleter.set(Result.failure());
++            }
++            return;
++        }
++
+         ReactContext reactContext = reactHost.getCurrentReactContext();
+ 
+         if (reactContext == null) {
+-            reactHost.addReactInstanceEventListener(new ReactInstanceEventListener() {
++            final ReactInstanceEventListener listener = new ReactInstanceEventListener() {
+                 public void onReactContextInitialized(ReactContext reactContext) {
+                     HeadlessJsTaskWorker.this.invokeStartTask(reactContext, taskConfig);
+                     reactHost.removeReactInstanceEventListener(this);
+                 }
+-            });
+-            reactHost.start();
++            };
++            reactHost.addReactInstanceEventListener(listener);
++            try {
++                reactHost.start();
++            } catch (Throwable error) {
++                reactHost.removeReactInstanceEventListener(listener);
++                if (this.mCompleter != null) {
++                    this.mCompleter.set(Result.failure());
++                }
++            }
+         } else {
+             this.invokeStartTask(reactContext, taskConfig);
+         }
+     }
+ 
++    private boolean startTaskWithReactNativeHost(final HeadlessJsTaskConfig taskConfig) {
++        ReactNativeHost reactNativeHost = this.getReactNativeHost();
++        if (reactNativeHost == null) return false;
++
++        final ReactInstanceManager reactInstanceManager = reactNativeHost.getReactInstanceManager();
++        if (reactInstanceManager == null) return false;
++
++        ReactContext reactContext = reactInstanceManager.getCurrentReactContext();
++        if (reactContext == null) {
++            ReactInstanceEventListener listener = new ReactInstanceEventListener() {
++                @Override
++                public void onReactContextInitialized(ReactContext reactContext) {
++                    HeadlessJsTaskWorker.this.invokeStartTask(reactContext, taskConfig);
++                    reactInstanceManager.removeReactInstanceEventListener(this);
++                }
++            };
++
++            reactInstanceManager.addReactInstanceEventListener(listener);
++            if (!reactInstanceManager.hasStartedCreatingInitialContext()) {
++                reactInstanceManager.createReactContextInBackground();
++            }
++        } else {
++            this.invokeStartTask(reactContext, taskConfig);
++        }
++
++        return true;
++    }
++
+     private void invokeStartTask(ReactContext reactContext, final HeadlessJsTaskConfig taskConfig) {
+         final HeadlessJsTaskContext headlessJsTaskContext = HeadlessJsTaskContext.getInstance(reactContext);
+         headlessJsTaskContext.addTaskEventListener(this);
+@@ -94,13 +143,10 @@ public abstract class HeadlessJsTaskWorker extends ListenableWorker implements H
+     }
+ 
+     private void cleanUpTask() {
+-        ReactHost reactNativeHost = this.getReactHost();
+-        if (reactNativeHost != null) {
+-            ReactContext reactContext = reactNativeHost.getCurrentReactContext();
+-            if (reactContext != null) {
+-                HeadlessJsTaskContext headlessJsTaskContext = HeadlessJsTaskContext.getInstance(reactContext);
+-                headlessJsTaskContext.removeTaskEventListener(this);
+-            }
++        ReactContext reactContext = getCurrentReactContext();
++        if (reactContext != null) {
++            HeadlessJsTaskContext headlessJsTaskContext = HeadlessJsTaskContext.getInstance(reactContext);
++            headlessJsTaskContext.removeTaskEventListener(this);
+         }
+     }
+ 
+@@ -126,6 +172,33 @@ public abstract class HeadlessJsTaskWorker extends ListenableWorker implements H
+     }
+ 
+     private ReactHost getReactHost() {
+-        return ((ReactApplication) this.getApplicationContext()).getReactHost();
++        try {
++            return ((ReactApplication) this.getApplicationContext()).getReactHost();
++        } catch (Throwable ignored) {
++            return null;
++        }
++    }
++
++    private ReactNativeHost getReactNativeHost() {
++        try {
++            return ((ReactApplication) this.getApplicationContext()).getReactNativeHost();
++        } catch (Throwable ignored) {
++            return null;
++        }
++    }
++
++    private ReactContext getCurrentReactContext() {
++        ReactNativeHost reactNativeHost = getReactNativeHost();
++        if (reactNativeHost != null && reactNativeHost.getReactInstanceManager() != null) {
++            ReactContext context = reactNativeHost.getReactInstanceManager().getCurrentReactContext();
++            if (context != null) return context;
++        }
++
++        ReactHost reactHost = getReactHost();
++        if (reactHost != null) {
++            return reactHost.getCurrentReactContext();
++        }
++
++        return null;
+     }
+ }

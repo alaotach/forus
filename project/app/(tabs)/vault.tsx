@@ -13,6 +13,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  PermissionsAndroid,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -98,16 +99,18 @@ export default function VaultScreen() {
   const [editNameModalVisible, setEditNameModalVisible] = useState(false);
   const [newItemName, setNewItemName] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+  const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
   const [uploadingMediaKind, setUploadingMediaKind] = useState<'photo' | 'audio' | null>(null);
   const [downloadingItemById, setDownloadingItemById] = useState<Record<string, boolean>>({});
   const [unavailableItemById, setUnavailableItemById] = useState<Record<string, boolean>>({});
   const uploadedLocalMediaPathByFileKeyRef = useRef<Record<string, string>>({});
+  const uploadedLocalMediaPathByMediaIdRef = useRef<Record<string, string>>({});
   const recordingTimer = useRef<NodeJS.Timeout | null>(null);
   const isUploadingMedia = uploadingMediaKind !== null;
-  
-  const recorder = useAudioRecorder({
+
+  const recordingOptions = {
     android: {
       extension: '.m4a',
       outputFormat: 'mpeg4',
@@ -131,7 +134,9 @@ export default function VaultScreen() {
       mimeType: 'audio/webm',
       bitsPerSecond: 128000,
     },
-  });
+  };
+
+  const recorder = useAudioRecorder(recordingOptions as any);
 
   const requestAudioPermission = async () => {
     try {
@@ -197,10 +202,17 @@ export default function VaultScreen() {
                 }
 
                 if (item.author === coupleData.nickname) {
-                  const localPath = uploadedLocalMediaPathByFileKeyRef.current[item.media.fileKey];
-                  if (localPath) {
-                    return { ...item, url: localPath };
+                  const localPathByFileKey = uploadedLocalMediaPathByFileKeyRef.current[item.media.fileKey];
+                  if (localPathByFileKey) {
+                    return { ...item, url: localPathByFileKey };
                   }
+                }
+              }
+
+              if (item.author === coupleData.nickname && item.media.mediaId) {
+                const localPathByMediaId = uploadedLocalMediaPathByMediaIdRef.current[item.media.mediaId];
+                if (localPathByMediaId) {
+                  return { ...item, url: localPathByMediaId };
                 }
               }
 
@@ -281,6 +293,8 @@ export default function VaultScreen() {
       pickImage();
     } else if (type === 'audio') {
       setShowAudioModal(true);
+      setIsRecording(false);
+      setIsRecordingPaused(false);
       setRecordingDuration(0);
       setCurrentRecordingUri(null);
     }
@@ -289,10 +303,20 @@ export default function VaultScreen() {
   const pickImage = async () => {
     if (isUploadingMedia) return;
     try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        quality: 0.8,
-      });
+      let result;
+      try {
+        result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ['images'],
+          quality: 0.8,
+        });
+      } catch (pickerError: any) {
+        const message = String(pickerError?.message || pickerError || '');
+        if (message.includes('ImagePickerOptions') || message.includes('Built-in class kotlin.Any is not found')) {
+          result = await ImagePicker.launchImageLibraryAsync();
+        } else {
+          throw pickerError;
+        }
+      }
 
       if (!result.canceled && result.assets[0]) {
         await uploadPhoto(result.assets[0].uri);
@@ -315,6 +339,9 @@ export default function VaultScreen() {
 
       if (media?.fileKey) {
         uploadedLocalMediaPathByFileKeyRef.current[media.fileKey] = uri;
+      }
+      if (media?.mediaId) {
+        uploadedLocalMediaPathByMediaIdRef.current[media.mediaId] = uri;
       }
 
       const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
@@ -384,11 +411,72 @@ export default function VaultScreen() {
     }
   };
 
+  const closeAudioModal = async () => {
+    if (recordingTimer.current) {
+      clearInterval(recordingTimer.current);
+      recordingTimer.current = null;
+    }
+
+    if (recorder && isRecording) {
+      try {
+        await recorder.stop();
+      } catch {
+        // no-op
+      }
+    }
+
+    setIsRecording(false);
+    setIsRecordingPaused(false);
+    setCurrentRecordingUri(null);
+    setRecordingDuration(0);
+    setShowAudioModal(false);
+  };
+
   const startRecording = async () => {
     try {
       if (!recorder) {
         Alert.alert('Error', 'Recorder not available');
         return;
+      }
+
+      // Resume from paused state without restarting the clip.
+      if (isRecording && isRecordingPaused) {
+        recorder.record();
+        setIsRecordingPaused(false);
+        recordingTimer.current = setInterval(() => {
+          setRecordingDuration(prev => prev + 1);
+        }, 1000);
+        return;
+      }
+
+      if (Platform.OS === 'android') {
+        const androidPermission = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message: 'Forus needs microphone access to record voice memos.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Deny',
+          }
+        );
+
+        if (androidPermission !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert('Permission needed', 'Microphone permission is required to record audio.');
+          return;
+        }
+      }
+
+      const requestRecordingPermissions =
+        (Audio as any)?.requestRecordingPermissionsAsync ||
+        (Audio as any)?.requestPermissionsAsync;
+
+      if (typeof requestRecordingPermissions === 'function') {
+        const permission = await requestRecordingPermissions();
+        const granted = permission?.granted === true || permission?.status === 'granted';
+        if (!granted) {
+          Alert.alert('Permission needed', 'Microphone permission is required to record audio.');
+          return;
+        }
       }
 
       // Make sure audio mode is set
@@ -398,10 +486,11 @@ export default function VaultScreen() {
       });
 
       console.log('Starting recording...');
-      await recorder.prepareToRecordAsync();
+      await recorder.prepareToRecordAsync(recordingOptions as any);
       recorder.record();
       
       setIsRecording(true);
+      setIsRecordingPaused(false);
       setRecordingDuration(0);
 
       recordingTimer.current = setInterval(() => {
@@ -413,9 +502,34 @@ export default function VaultScreen() {
     }
   };
 
+  const pauseRecording = async () => {
+    try {
+      if (!recorder || !isRecording || isRecordingPaused) return;
+
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
+        recordingTimer.current = null;
+      }
+
+      if (typeof (recorder as any).pause === 'function') {
+        await (recorder as any).pause();
+      } else {
+        await recorder.stop();
+      }
+
+      setIsRecordingPaused(true);
+    } catch (error) {
+      console.error('Error pausing recording:', error);
+      Alert.alert('Error', `Failed to pause recording: ${error}`);
+    }
+  };
+
   const stopRecording = async () => {
     try {
-      if (recordingTimer.current) clearInterval(recordingTimer.current);
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
+        recordingTimer.current = null;
+      }
       
       if (recorder && isRecording) {
         console.log('Stopping recording...');
@@ -431,6 +545,7 @@ export default function VaultScreen() {
         }
         
         setIsRecording(false);
+        setIsRecordingPaused(false);
       }
     } catch (error) {
       console.error('Error stopping recording:', error);
@@ -453,6 +568,9 @@ export default function VaultScreen() {
 
       if (media?.fileKey) {
         uploadedLocalMediaPathByFileKeyRef.current[media.fileKey] = currentRecordingUri;
+      }
+      if (media?.mediaId) {
+        uploadedLocalMediaPathByMediaIdRef.current[media.mediaId] = currentRecordingUri;
       }
 
       const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
@@ -477,6 +595,7 @@ export default function VaultScreen() {
 
       setShowAudioModal(false);
       setCurrentRecordingUri(null);
+      setIsRecordingPaused(false);
       setRecordingDuration(0);
       Alert.alert('Success', '🎤 Voice memo saved to your vault!');
     } catch (error) {
@@ -958,7 +1077,7 @@ export default function VaultScreen() {
           <LinearGradient colors={['#e17055', '#d63031']} style={styles.container}>
             <SafeAreaView style={styles.modalSafeArea}>
               <View style={styles.modalHeader}>
-                <TouchableOpacity onPress={() => setShowAudioModal(false)} disabled={isUploadingMedia}>
+                <TouchableOpacity onPress={() => { void closeAudioModal(); }} disabled={isUploadingMedia}>
                   <X size={24} color="#ffffff" />
                 </TouchableOpacity>
                 <Text style={styles.modalTitle}>Record Voice Memo 🎤</Text>
@@ -976,8 +1095,8 @@ export default function VaultScreen() {
                   <Text style={styles.durationText}>{formatDuration(recordingDuration)}</Text>
                   {isRecording && (
                     <View style={styles.recordingIndicator}>
-                      <View style={styles.recordingDot} />
-                      <Text style={styles.recordingText}>Recording...</Text>
+                      {!isRecordingPaused && <View style={styles.recordingDot} />}
+                      <Text style={styles.recordingText}>{isRecordingPaused ? 'Paused' : 'Recording...'}</Text>
                     </View>
                   )}
                 </View>
@@ -985,7 +1104,7 @@ export default function VaultScreen() {
                 <View style={styles.audioButtonsContainer}>
                   {!isRecording ? (
                     <TouchableOpacity 
-                      style={styles.recordButton}
+                      style={[styles.recordButton, styles.singleRecordButton]}
                       onPress={startRecording}
                       disabled={isUploadingMedia}
                     >
@@ -993,13 +1112,23 @@ export default function VaultScreen() {
                       <Text style={styles.recordButtonText}>Start Recording</Text>
                     </TouchableOpacity>
                   ) : (
-                    <TouchableOpacity 
-                      style={[styles.recordButton, styles.stopButton]}
-                      onPress={stopRecording}
-                      disabled={isUploadingMedia}
-                    >
-                      <Text style={styles.recordButtonText}>Stop</Text>
-                    </TouchableOpacity>
+                    <View style={styles.recordingControlRow}>
+                      <TouchableOpacity 
+                        style={[styles.recordButton, styles.pauseButton]}
+                        onPress={isRecordingPaused ? startRecording : pauseRecording}
+                        disabled={isUploadingMedia}
+                      >
+                        <Text style={styles.recordButtonText}>{isRecordingPaused ? 'Resume' : 'Pause'}</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity 
+                        style={[styles.recordButton, styles.stopButton]}
+                        onPress={stopRecording}
+                        disabled={isUploadingMedia}
+                      >
+                        <Text style={styles.recordButtonText}>Stop</Text>
+                      </TouchableOpacity>
+                    </View>
                   )}
                 </View>
               </View>
@@ -1534,6 +1663,11 @@ const styles = StyleSheet.create({
   },
   audioButtonsContainer: {
     width: '100%',
+    alignItems: 'center',
+  },
+  recordingControlRow: {
+    flexDirection: 'row',
+    gap: 12,
   },
   recordButton: {
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
@@ -1542,6 +1676,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    flex: 1,
+  },
+  pauseButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  singleRecordButton: {
+    flex: 0,
+    minWidth: 220,
+    paddingHorizontal: 28,
   },
   stopButton: {
     backgroundColor: '#ff6b6b',

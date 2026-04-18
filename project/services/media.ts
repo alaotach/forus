@@ -1,7 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
-import * as FileSystem from 'expo-file-system';
-import * as MediaLibrary from 'expo-media-library';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import { getMediaAuthToken } from './mediaAuth';
 import { reportMediaFailureMetric } from './mediaMetrics';
@@ -90,6 +89,16 @@ const CACHE_DIR = `${FileSystem.cacheDirectory || ''}media-cache/`;
 const CACHE_MAX_BYTES = 100 * 1024 * 1024;
 const CACHE_ENTRY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const NETWORK_TIMEOUT_MS = 15000;
+
+type ExpoMediaLibraryModule = typeof import('expo-media-library');
+let mediaLibraryModulePromise: Promise<ExpoMediaLibraryModule> | null = null;
+
+async function getMediaLibraryModule(): Promise<ExpoMediaLibraryModule> {
+  if (!mediaLibraryModulePromise) {
+    mediaLibraryModulePromise = import('expo-media-library');
+  }
+  return mediaLibraryModulePromise;
+}
 
 function getBackendUrl(): string {
   const backendUrl = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -586,9 +595,8 @@ export async function saveCachedMediaToDevice(fileKey: string, mediaType: MediaT
     throw new Error('No cached media found for this fileKey');
   }
 
-  const granularPermissions: Array<'photo' | 'video' | 'audio'> =
-    mediaType === 'audio' ? ['audio'] : ['photo'];
-  const permission = await MediaLibrary.requestPermissionsAsync(false, granularPermissions);
+  const MediaLibrary = await getMediaLibraryModule();
+  const permission = await MediaLibrary.requestPermissionsAsync();
   if (!permission.granted) {
     throw new Error(`Media library permission denied for ${mediaType}`);
   }

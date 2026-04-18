@@ -7,6 +7,7 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut,
+  updateCurrentUser,
   onAuthStateChanged,
   User,
   AuthError,
@@ -70,7 +71,13 @@ export async function logoutUser(): Promise<void> {
     await signOut(auth);
   } catch (error) {
     console.error('Logout error:', error);
-    throw error;
+    // Fallback for edge cases where native signOut bridge fails but local session can be cleared.
+    try {
+      await updateCurrentUser(auth, null);
+    } catch (fallbackError) {
+      console.error('Logout fallback error:', fallbackError);
+      throw error;
+    }
   }
 }
 

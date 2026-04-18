@@ -1,26 +1,29 @@
 {
   "expo": {
-    "name": "Couples Connection",
+    "name": "forus",
     "slug": "couples-connection",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "couples-connection",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.couplesconnection.app"
+      "bundleIdentifier": "com.alaotach.forus"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.couplesconnection.app",
+      "googleServicesFile": "./google-services.json",
+      "package": "com.alaotach.forus",
       "permissions": [
         "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS"
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
       ]
     },
     "web": {
@@ -51,7 +54,48 @@
           "icon": "./assets/images/notification-icon.png",
           "color": "#ff6b9d"
         }
-      ]
+      ],
+      [
+        "react-native-android-widget",
+        {
+          "widgets": [
+            {
+              "name": "ForusSharedCanvas",
+              "label": "Forus Shared Canvas (5x3)",
+              "description": "Shared photo, doodle and caption (5x3 default).",
+              "minWidth": "300dp",
+              "minHeight": "180dp",
+              "targetCellWidth": 5,
+              "targetCellHeight": 3,
+              "resizeMode": "horizontal|vertical",
+              "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "ForusSharedCanvas4x4",
+              "label": "Forus Shared Canvas (4x4)",
+              "description": "Shared photo, doodle and caption (4x4 preset).",
+              "minWidth": "240dp",
+              "minHeight": "240dp",
+              "targetCellWidth": 4,
+              "targetCellHeight": 4,
+              "resizeMode": "horizontal|vertical",
+              "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "ForusSharedCanvas3x3",
+              "label": "Forus Shared Canvas (3x3)",
+              "description": "Shared photo, doodle and caption (3x3 preset).",
+              "minWidth": "180dp",
+              "minHeight": "180dp",
+              "targetCellWidth": 3,
+              "targetCellHeight": 3,
+              "resizeMode": "horizontal|vertical",
+              "updatePeriodMillis": 1800000
+            }
+          ]
+        }
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true

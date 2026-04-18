@@ -27,14 +27,17 @@ export default function JoinCoupleScreen() {
   const [loading, setLoading] = useState(false);
   const user = getCurrentUser();
 
+  const normalizeCoupleCode = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+
   const handleJoin = async () => {
     if (!coupleCode.trim() || !nickname.trim()) {
       Alert.alert('Error', 'Please fill in all fields');
       return;
     }
 
-    if (coupleCode.trim().length !== 6) {
-      Alert.alert('Error', 'Couple code must be 6 digits');
+    const normalizedCode = normalizeCoupleCode(coupleCode.trim());
+    if (!/^[A-Z0-9]{8}$/.test(normalizedCode)) {
+      Alert.alert('Error', 'Couple code must be 8 letters/numbers');
       return;
     }
 
@@ -49,7 +52,7 @@ export default function JoinCoupleScreen() {
     try {
       const result = await joinCoupleWithCode(
         user!.uid,
-        coupleCode.trim(),
+        normalizedCode,
         nickname.trim()
       );
 
@@ -57,7 +60,7 @@ export default function JoinCoupleScreen() {
         // Save couple data locally
         await saveCoupleData({
           nickname: nickname.trim(),
-          coupleCode: coupleCode.trim(),
+          coupleCode: normalizedCode,
         });
         
         Alert.alert(
@@ -110,20 +113,19 @@ export default function JoinCoupleScreen() {
                 <KeyRound size={20} color="#ff6b9d" style={styles.inputIcon} />
                 <TextInput
                   style={styles.input}
-                  placeholder="000000"
+                  placeholder="AB12CD34"
                   placeholderTextColor="#999"
                   value={coupleCode}
                   onChangeText={(text) => {
-                    const digits = text.replace(/[^0-9]/g, '').slice(0, 6);
-                    setCoupleCode(digits);
+                    setCoupleCode(normalizeCoupleCode(text));
                   }}
-                  keyboardType="number-pad"
-                  maxLength={6}
+                  autoCapitalize="characters"
+                  maxLength={8}
                   editable={!loading}
                   autoFocus
                 />
               </View>
-              <Text style={styles.inputHint}>Enter 6-digit code</Text>
+              <Text style={styles.inputHint}>Enter 8-character code</Text>
 
               <View style={styles.inputWrapper}>
                 <User size={20} color="#ff6b9d" style={styles.inputIcon} />

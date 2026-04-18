@@ -14,7 +14,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Flame, PenTool, MessageCircle, Users, Calendar, Heart, Sparkles } from 'lucide-react-native';
 import { useCouple } from '@/hooks/useCouple';
 import { useRouter } from 'expo-router';
-import { usePushNotifications } from '@/hooks/usePushNotifications';
 import { doc, getDoc, getDocs, setDoc, updateDoc, serverTimestamp, collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { getTodaysPrompt } from '@/services/prompts';
@@ -51,9 +50,6 @@ export default function HomeScreen() {
   const mounted = useRef(true);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
-  
-  // Initialize push notifications
-  usePushNotifications();
   
   const [streakData, setStreakData] = useState<StreakData>({
     appStreak: 0,
@@ -93,6 +89,7 @@ export default function HomeScreen() {
     loadTodaysParagraph();
     loadPartnerNickname();
     const unsubscribeMood = subscribeToTodaysMoods();
+    let unsubscribeNotifications: (() => void) | undefined;
     
     // Cleanup expired vault items for free plan users
     if (coupleData) {
@@ -106,7 +103,7 @@ export default function HomeScreen() {
       );
       
       // Setup real-time notification listener
-      setupNotificationListener(coupleData.coupleCode);
+      unsubscribeNotifications = setupNotificationListener(coupleData.coupleCode);
     }
 
     // Animate in
@@ -125,6 +122,7 @@ export default function HomeScreen() {
 
     return () => {
       if (unsubscribeMood) unsubscribeMood();
+      if (unsubscribeNotifications) unsubscribeNotifications();
       mounted.current = false;
     };
   }, [isConnected, isLoading, coupleData]);
@@ -189,7 +187,7 @@ export default function HomeScreen() {
       if (mood !== previousMood) {
         const moodEmoji = getMoodEmoji(mood);
         const { notifyMoodChanged } = await import('@/services/notifications');
-        notifyMoodChanged(
+        await notifyMoodChanged(
           coupleData.coupleCode,
           coupleData.nickname,
           mood,
@@ -289,7 +287,7 @@ export default function HomeScreen() {
             if (shouldIncreaseStreak && newAppStreak > 0 && newAppStreak % 7 === 0) {
               try {
                 const { notifyStreakMilestone } = await import('@/services/notifications');
-                notifyStreakMilestone(coupleData.coupleCode, newAppStreak, 'app');
+                await notifyStreakMilestone(coupleData.coupleCode, newAppStreak, 'app');
               } catch (e) { console.log(e); }
             }
           } else {

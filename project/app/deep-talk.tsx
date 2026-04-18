@@ -207,13 +207,34 @@ export default function DeepTalkScreen() {
         },
       };
 
-      // Check if both partners have answered
-      const bothAnswered = Object.keys(updatedResponses).length === 2;
+      // Check if both partners have answered with non-empty responses.
+      const answeredCount = Object.values(updatedResponses).filter((entry: any) => {
+        const answer = entry?.answer;
+        return typeof answer === 'string' && answer.trim().length > 0;
+      }).length;
+      const bothAnswered = answeredCount >= 2 || deepTalk.unlocked === true;
+      const hadAlreadyAnswered = Boolean(deepTalk.responses?.[coupleData.nickname]?.answer?.trim?.());
 
       await updateDoc(deepTalkRef, {
         responses: updatedResponses,
         unlocked: bothAnswered,
       });
+
+      if (!bothAnswered && !hadAlreadyAnswered) {
+        try {
+          const { notifyDeepQuestionPrompt } = await import('@/services/notifications');
+          await notifyDeepQuestionPrompt(coupleData.coupleCode, coupleData.nickname);
+        } catch (error) {
+          console.warn('Deep question partner prompt failed:', error);
+        }
+      }
+
+      try {
+        const { refreshCompletionReminders } = await import('@/services/push-notifications');
+        await refreshCompletionReminders(coupleData.coupleCode, coupleData.nickname);
+      } catch {
+        // non-blocking
+      }
 
       setDeepTalk(prev => prev ? {
         ...prev,

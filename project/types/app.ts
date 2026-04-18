@@ -139,3 +139,24 @@ export interface EchoMemory {
   mood?: string;
   keywords: string[];
 }
+
+export interface WidgetStrokePoint {
+  x: number;
+  y: number;
+}
+
+export interface WidgetStroke {
+  id: string;
+  color: string;
+  width: number;
+  points: WidgetStrokePoint[];
+}
+
+export interface SharedWidgetSlot {
+  media?: MediaRef;
+  caption?: string;
+  postedBy?: string;
+  updatedAt?: Timestamp;
+  doodleStrokes?: WidgetStroke[];
+  backgroundColor?: string;
+}

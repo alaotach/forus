@@ -7,8 +7,11 @@ import { PlayfairDisplay_400Regular, PlayfairDisplay_700Bold } from '@expo-googl
 import * as SplashScreen from 'expo-splash-screen';
 import { onAuthStateChange, isCoupleConnected } from '@/services/auth';
 import { User } from 'firebase/auth';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, Platform, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '@/services/firebase';
+import { requestForusWidgetUpdate, syncWidgetCacheFromFirestore } from '@/services/androidWidget';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -20,6 +23,7 @@ export default function RootLayout() {
   const [user, setUser] = useState<User | null>(null);
   const [coupleConnected, setCoupleConnected] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  const [widgetSyncIdentity, setWidgetSyncIdentity] = useState<{ coupleCode: string; nickname: string } | null>(null);
 
   const [fontsLoaded, fontError] = useFonts({
     'Inter-Regular': Inter_400Regular,
@@ -55,6 +59,64 @@ export default function RootLayout() {
 
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setCoupleConnected(false);
+      return;
+    }
+
+    const unsubscribe = onSnapshot(
+      doc(db, 'users', user.uid),
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          setCoupleConnected(false);
+          setWidgetSyncIdentity(null);
+          return;
+        }
+
+        const data = snapshot.data() as any;
+        const connected = Boolean(data?.coupleCode && data?.partnerUid && data?.nickname);
+        setCoupleConnected(connected);
+        if (connected) {
+          setWidgetSyncIdentity({
+            coupleCode: String(data.coupleCode),
+            nickname: String(data.nickname),
+          });
+        } else {
+          setWidgetSyncIdentity(null);
+        }
+      },
+      (error) => {
+        console.error('Error listening to couple connection state:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    if (!coupleConnected || !widgetSyncIdentity?.coupleCode || !widgetSyncIdentity?.nickname) return;
+
+    const widgetDocRef = doc(db, 'couples', widgetSyncIdentity.coupleCode, 'widget', 'shared');
+    const unsubscribe = onSnapshot(
+      widgetDocRef,
+      async () => {
+        try {
+          await syncWidgetCacheFromFirestore(widgetSyncIdentity);
+          await requestForusWidgetUpdate(widgetSyncIdentity.coupleCode);
+        } catch (error) {
+          console.error('Global widget sync failed:', error);
+        }
+      },
+      (error) => {
+        console.error('Global widget listener failed:', error);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [coupleConnected, widgetSyncIdentity]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -105,6 +167,7 @@ export default function RootLayout() {
         <Stack.Screen name="settings" />
         <Stack.Screen name="support" />
         <Stack.Screen name="mood-history" />
+        <Stack.Screen name="live-widget" />
         <Stack.Screen name="+not-found" />
       </Stack>
       <StatusBar style="auto" />

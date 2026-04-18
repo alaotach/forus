@@ -1,0 +1,10 @@
+<resources>
+  <string name="app_name">forus</string>
+  <string name="expo_system_ui_user_interface_style" translatable="false">automatic</string>
+  <string name="widget_forussharedcanvas_description" translatable="false">Shared photo, doodle and caption for both partners.</string>
+  <string name="widget_forussharedcanvas_5x4_label" translatable="false">Forus Widget (5x3 default)</string>
+  <string name="widget_forussharedcanvas_4x4_label" translatable="false">Forus Widget (4x4)</string>
+  <string name="widget_forussharedcanvas_3x3_label" translatable="false">Forus Widget (3x3)</string>
+  <string name="widget_forussharedcanvas_4x4_description" translatable="false">Shared photo, doodle and caption (4x4 preset).</string>
+  <string name="widget_forussharedcanvas_3x3_description" translatable="false">Shared photo, doodle and caption (3x3 preset).</string>
+</resources>

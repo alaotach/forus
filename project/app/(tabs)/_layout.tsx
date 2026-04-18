@@ -1,47 +1,84 @@
-import { Tabs } from 'expo-router';
+import { Tabs, usePathname } from 'expo-router';
 import { Heart, MessageCircle, Archive, Target, Sparkles, PenTool, Bell } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { View, Text } from 'react-native';
 import { useState, useEffect } from 'react';
 import { useCouple } from '@/hooks/useCouple';
+import { usePushNotifications } from '@/hooks/usePushNotifications';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { db } from '@/services/firebase';
+import { markNotificationsAsReadByTypes } from '@/services/notifications';
+import { setActiveNotificationRoute } from '@/services/push-notifications';
 
 export default function TabLayout() {
   const { coupleData } = useCouple();
-  const [unreadCount, setUnreadCount] = useState(0);
+  const pathname = usePathname();
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [vaultUnreadCount, setVaultUnreadCount] = useState(0);
+  const [writeUnreadCount, setWriteUnreadCount] = useState(0);
+  const [moreUnreadCount, setMoreUnreadCount] = useState(0);
+
+  // Ensure push registration is initialized regardless of which tab opens first.
+  usePushNotifications();
 
   useEffect(() => {
     if (!coupleData) return;
 
-    try {
-      const { subscribeToNotifications } = require('@/services/notifications');
-      
-      const unsubscribe = subscribeToNotifications(coupleData.coupleCode, (payload: any) => {
-        const notificationsList = Array.isArray(payload)
-          ? payload
-          : payload
-            ? [payload]
-            : [];
+    const notifRef = collection(db, 'notifications', coupleData.coupleCode, 'events');
+    const unreadQuery = query(notifRef, where('read', '==', false));
 
-        const unreadNotifications = notificationsList.filter((n: any) => n && !n.read);
+    const unsubscribe = onSnapshot(unreadQuery, (snapshot) => {
+      const unreadForMe = snapshot.docs
+        .map((entry) => entry.data() as any)
+        .filter((data) => data?.from !== coupleData.nickname);
 
-        // subscribeToNotifications emits one notification at a time.
-        // When we receive a single unread notification, increment the badge.
-        if (!Array.isArray(payload)) {
-          if (unreadNotifications.length > 0) {
-            setUnreadCount(prev => prev + unreadNotifications.length);
-          }
-          return;
-        }
+      const chat = unreadForMe.filter((data) => String(data?.type || '') === 'message').length;
+      const vault = unreadForMe.filter((data) => {
+        const type = String(data?.type || '');
+        return type === 'memory' || type === 'shared-diary';
+      }).length;
+      const write = unreadForMe.filter((data) => {
+        const type = String(data?.type || '');
+        return type === 'paragraph' || type === 'deep-question';
+      }).length;
+      const more = unreadForMe.length - chat - vault - write;
 
-        // If an array is ever provided, use it as the source of truth.
-        setUnreadCount(unreadNotifications.length);
-      });
-
-      return unsubscribe;
-    } catch (error) {
+      setChatUnreadCount(chat);
+      setVaultUnreadCount(vault);
+      setWriteUnreadCount(write);
+      setMoreUnreadCount(Math.max(0, more));
+    }, (error) => {
       console.error('Error setting up notification badge listener:', error);
-    }
+    });
+
+    return unsubscribe;
   }, [coupleData]);
+
+  useEffect(() => {
+    if (!coupleData) return;
+
+    let typesToMark: Array<'message' | 'paragraph' | 'memory' | 'streak' | 'milestone' | 'echo' | 'goal' | 'mood' | 'deep-question'> = [];
+
+    if (pathname?.includes('/chat')) {
+      typesToMark = ['message'];
+    } else if (pathname?.includes('/vault')) {
+      typesToMark = ['memory', 'shared-diary'];
+    } else if (pathname?.includes('/shared-diary')) {
+      typesToMark = ['shared-diary'];
+    } else if (pathname?.includes('/write') || pathname?.includes('/paragraph') || pathname?.includes('/deep-talk')) {
+      typesToMark = ['paragraph', 'deep-question'];
+    } else if (pathname?.includes('/more')) {
+      typesToMark = ['streak', 'milestone', 'echo', 'goal', 'mood', 'shared-diary'];
+    }
+
+    if (typesToMark.length > 0) {
+      markNotificationsAsReadByTypes(coupleData.coupleCode, typesToMark, coupleData.nickname).catch(() => undefined);
+    }
+  }, [pathname, coupleData]);
+
+  useEffect(() => {
+    setActiveNotificationRoute(pathname || '');
+  }, [pathname]);
   return (
     <Tabs
       screenOptions={{
@@ -95,7 +132,7 @@ export default function TabLayout() {
           tabBarIcon: ({ size, color }) => (
             <MessageCircle size={size} color={color} />
           ),
-          tabBarBadge: undefined, // You can add badge count here for unread messages
+          tabBarBadge: chatUnreadCount > 0 ? (chatUnreadCount > 9 ? '9+' : chatUnreadCount) : undefined,
         }}
       />
       <Tabs.Screen
@@ -105,6 +142,7 @@ export default function TabLayout() {
           tabBarIcon: ({ size, color }) => (
             <PenTool size={size} color={color} />
           ),
+          tabBarBadge: writeUnreadCount > 0 ? (writeUnreadCount > 9 ? '9+' : writeUnreadCount) : undefined,
         }}
       />
       <Tabs.Screen
@@ -114,6 +152,7 @@ export default function TabLayout() {
           tabBarIcon: ({ size, color }) => (
             <Archive size={size} color={color} />
           ),
+          tabBarBadge: vaultUnreadCount > 0 ? (vaultUnreadCount > 9 ? '9+' : vaultUnreadCount) : undefined,
         }}
       />
       <Tabs.Screen
@@ -129,31 +168,8 @@ export default function TabLayout() {
         name="more"
         options={{
           title: 'More',
-          tabBarIcon: ({ size, color }) => (
-            <View>
-              <Sparkles size={size} color={color} />
-              {unreadCount > 0 && (
-                <View
-                  style={{
-                    position: 'absolute',
-                    top: -4,
-                    right: -6,
-                    backgroundColor: '#ff6b9d',
-                    borderRadius: 10,
-                    minWidth: 20,
-                    height: 20,
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                  }}
-                >
-                  <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold' }}>
-                    {unreadCount > 9 ? '9+' : unreadCount}
-                  </Text>
-                </View>
-              )}
-            </View>
-          ),
-          tabBarBadge: unreadCount > 0 ? unreadCount : undefined,
+          tabBarIcon: ({ size, color }) => <Sparkles size={size} color={color} />,
+          tabBarBadge: moreUnreadCount > 0 ? (moreUnreadCount > 9 ? '9+' : moreUnreadCount) : undefined,
         }}
       />
     </Tabs>

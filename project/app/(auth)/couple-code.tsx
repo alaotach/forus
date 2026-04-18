@@ -53,10 +53,20 @@ export default function CoupleCodeScreen() {
 
   const handleCopyCode = async () => {
     if (!coupleCode) return;
-    
-    await Clipboard.setStringAsync(coupleCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+
+    try {
+      const setStringSync = (Clipboard as any).setString;
+      if (typeof setStringSync === 'function') {
+        setStringSync(coupleCode);
+      } else {
+        await Clipboard.setStringAsync(coupleCode);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error('Error copying code:', error);
+      Alert.alert('Copy Failed', 'Unable to copy code right now.');
+    }
   };
 
   const handleShareCode = async () => {
@@ -116,7 +126,7 @@ export default function CoupleCodeScreen() {
             <Text style={styles.codeLabel}>YOUR CODE</Text>
             <Text style={styles.code}>{coupleCode}</Text>
             <View style={styles.codeBadge}>
-              <Text style={styles.codeBadgeText}>6-digit code</Text>
+              <Text style={styles.codeBadgeText}>8-character code</Text>
             </View>
           </View>
 

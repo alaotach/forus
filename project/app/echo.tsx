@@ -9,14 +9,17 @@ import {
   KeyboardAvoidingView,
   Platform,
   Animated,
+  Modal,
+  Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ArrowLeft, Send, Bot, Heart } from 'lucide-react-native';
+import { ArrowLeft, Send, Bot, Heart, Settings } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { useCouple } from '@/hooks/useCouple';
 import { generateEchoResponse, CoupleContext, checkBackendHealth } from '@/services/openai';
-import { collection, query, orderBy, limit, getDocs, doc, getDoc, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, orderBy, limit, getDocs, doc, getDoc, addDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 
 interface EchoMessage {
@@ -24,6 +27,43 @@ interface EchoMessage {
   content: string;
   isEcho: boolean;
   timestamp: Date;
+}
+
+interface EchoConfig {
+  echoDisplayName: string;
+  partnerStyle: string;
+  questionFocus: string;
+  avoidTopics: string;
+}
+
+function safeSnippet(value: unknown, maxLen: number = 180): string {
+  if (typeof value !== 'string') return '';
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 1)}...` : cleaned;
+}
+
+function toMillis(value: any): number {
+  if (value?.toDate && typeof value.toDate === 'function') {
+    return value.toDate().getTime();
+  }
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+}
+
+const DEFAULT_ECHO_CONFIG: EchoConfig = {
+  echoDisplayName: 'Echo',
+  partnerStyle: '',
+  questionFocus: '',
+  avoidTopics: '',
+};
+
+function isEchoConfigComplete(config: EchoConfig): boolean {
+  return config.partnerStyle.trim().length > 0 && config.questionFocus.trim().length > 0;
 }
 
 const TypingIndicator = () => {
@@ -63,14 +103,30 @@ export default function EchoScreen() {
   const [messages, setMessages] = useState<EchoMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isLoadingConfig, setIsLoadingConfig] = useState(true);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [isConfigModalVisible, setIsConfigModalVisible] = useState(false);
+  const [echoConfig, setEchoConfig] = useState<EchoConfig>(DEFAULT_ECHO_CONFIG);
+  const [draftEchoConfig, setDraftEchoConfig] = useState<EchoConfig>(DEFAULT_ECHO_CONFIG);
   const [conversationHistory, setConversationHistory] = useState<{ role: 'user' | 'assistant', content: string }[]>([]);
   const [coupleContext, setCoupleContext] = useState<CoupleContext>({
     nickname: coupleData?.nickname || '',
   });
   const flatListRef = useRef<FlatList>(null);
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const hasAutoOpenedConfigRef = useRef(false);
+  const configIdentityRef = useRef('');
 
   useEffect(() => {
+    if (!coupleData?.coupleCode || !coupleData?.nickname) return;
+
+    const identityKey = `${coupleData.coupleCode}:${coupleData.nickname}`;
+    if (configIdentityRef.current !== identityKey) {
+      configIdentityRef.current = identityKey;
+      hasAutoOpenedConfigRef.current = false;
+    }
+
+    loadEchoConfig();
     loadCoupleContext();
     loadEchoMessages();
 
@@ -80,54 +136,193 @@ export default function EchoScreen() {
       duration: 800,
       useNativeDriver: true,
     }).start();
-  }, []);
+  }, [coupleData?.coupleCode, coupleData?.nickname]);
+
+  const loadEchoConfig = async () => {
+    if (!coupleData) return;
+
+    try {
+      setIsLoadingConfig(true);
+      const configRef = doc(db, 'couples', coupleData.coupleCode, 'echoSettings', coupleData.nickname);
+      const configSnap = await getDoc(configRef);
+
+      const loadedConfig: EchoConfig = configSnap.exists()
+        ? {
+            echoDisplayName: String(configSnap.data().echoDisplayName || 'Echo'),
+            partnerStyle: String(configSnap.data().partnerStyle || ''),
+            questionFocus: String(configSnap.data().questionFocus || ''),
+            avoidTopics: String(configSnap.data().avoidTopics || ''),
+          }
+        : { ...DEFAULT_ECHO_CONFIG };
+
+      setEchoConfig(loadedConfig);
+      setDraftEchoConfig(loadedConfig);
+
+      if (!isEchoConfigComplete(loadedConfig) && !hasAutoOpenedConfigRef.current) {
+        hasAutoOpenedConfigRef.current = true;
+        setIsConfigModalVisible(true);
+      }
+    } catch (error) {
+      console.error('Error loading Echo config:', error);
+      const fallbackConfig = { ...DEFAULT_ECHO_CONFIG };
+      setEchoConfig(fallbackConfig);
+      setDraftEchoConfig(fallbackConfig);
+      if (!hasAutoOpenedConfigRef.current) {
+        hasAutoOpenedConfigRef.current = true;
+        setIsConfigModalVisible(true);
+      }
+    } finally {
+      setIsLoadingConfig(false);
+    }
+  };
+
+  const saveEchoConfig = async () => {
+    if (!coupleData) return;
+
+    const normalizedConfig: EchoConfig = {
+      echoDisplayName: draftEchoConfig.echoDisplayName.trim() || 'Echo',
+      partnerStyle: draftEchoConfig.partnerStyle.trim(),
+      questionFocus: draftEchoConfig.questionFocus.trim(),
+      avoidTopics: draftEchoConfig.avoidTopics.trim(),
+    };
+
+    if (!isEchoConfigComplete(normalizedConfig)) {
+      Alert.alert('More details needed', 'Please fill in partner style and what Echo should ask about.');
+      return;
+    }
+
+    try {
+      setIsSavingConfig(true);
+      const configRef = doc(db, 'couples', coupleData.coupleCode, 'echoSettings', coupleData.nickname);
+      await setDoc(configRef, {
+        ...normalizedConfig,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+
+      hasAutoOpenedConfigRef.current = true;
+      setEchoConfig(normalizedConfig);
+      setDraftEchoConfig(normalizedConfig);
+      setIsConfigModalVisible(false);
+    } catch (error) {
+      console.error('Error saving Echo config:', error);
+      Alert.alert('Error', 'Could not save Echo settings. Please try again.');
+    } finally {
+      setIsSavingConfig(false);
+    }
+  };
 
   const loadCoupleContext = async () => {
     if (!coupleData) return;
 
     try {
-      // Get partner nickname
       const coupleRef = doc(db, 'couples', coupleData.coupleCode);
       const coupleDoc = await getDoc(coupleRef);
       let partnerNickname = '';
-      
+
       if (coupleDoc.exists()) {
         const users = coupleDoc.data().users || {};
         partnerNickname = Object.keys(users).find(name => name !== coupleData.nickname) || '';
       }
 
-      // Get recent chat messages
       const messagesRef = collection(db, 'couples', coupleData.coupleCode, 'chat');
       const messagesQuery = query(messagesRef, orderBy('timestamp', 'desc'), limit(10));
       const messagesSnapshot = await getDocs(messagesQuery);
-      const recentMessages = messagesSnapshot.docs.map(doc => doc.data().message);
+      const recentMessages = messagesSnapshot.docs
+        .map((snapshotDoc) => safeSnippet(snapshotDoc.data().message, 120))
+        .filter(Boolean)
+        .slice(0, 5);
 
-      // Get recent paragraphs
-      const today = new Date();
-      const recentDates = [];
-      for (let i = 0; i < 7; i++) {
-        const date = new Date(today);
-        date.setDate(date.getDate() - i);
-        recentDates.push(date.toISOString().split('T')[0]);
-      }
+      const paragraphsRef = collection(db, 'dailyParagraphs');
+      const paragraphsQuery = query(
+        paragraphsRef,
+        where('coupleCode', '==', coupleData.coupleCode),
+        where('nickname', '==', coupleData.nickname)
+      );
+      const paragraphsSnapshot = await getDocs(paragraphsQuery);
+      const sortedParagraphDocs = [...paragraphsSnapshot.docs].sort(
+        (a, b) => toMillis(b.data().timestamp) - toMillis(a.data().timestamp)
+      );
 
-      const recentParagraphs: string[] = [];
-      for (const date of recentDates) {
-        try {
-          const paragraphRef = doc(db, 'dailyParagraphs', coupleData.coupleCode, date, coupleData.nickname);
-          const paragraphDoc = await getDoc(paragraphRef);
-          if (paragraphDoc.exists()) {
-            recentParagraphs.push(paragraphDoc.data().content);
-          }
-        } catch (error) {
-          // Continue if paragraph doesn't exist
-        }
-      }
+      const recentDailyWritingAnswers = sortedParagraphDocs
+        .map((snapshotDoc) => {
+          const data = snapshotDoc.data();
+          const promptSnippet = safeSnippet(data.prompt, 80);
+          const answerSnippet = safeSnippet(data.content, 180);
+          if (!answerSnippet) return '';
+          return promptSnippet ? `Prompt: ${promptSnippet} | Answer: ${answerSnippet}` : answerSnippet;
+        })
+        .filter(Boolean)
+        .slice(0, 4);
+
+      const deepTalkRef = collection(db, 'deepTalks', coupleData.coupleCode, 'items');
+      const deepTalkQuery = query(deepTalkRef, orderBy('date', 'desc'), limit(8));
+      const deepTalkSnapshot = await getDocs(deepTalkQuery);
+      const recentDeepTalkAnswers = deepTalkSnapshot.docs
+        .map((snapshotDoc) => {
+          const data = snapshotDoc.data() as any;
+          const question = safeSnippet(data?.question, 100);
+          const myAnswer = safeSnippet(data?.responses?.[coupleData.nickname]?.answer, 160);
+          const partnerAnswer = safeSnippet(
+            Object.keys(data?.responses || {})
+              .filter((key) => key !== coupleData.nickname)
+              .map((key) => data?.responses?.[key]?.answer)
+              .find((answer) => typeof answer === 'string' && answer.trim().length > 0),
+            120
+          );
+
+          if (!myAnswer && !partnerAnswer) return '';
+          if (question && myAnswer) return `Q: ${question} | My answer: ${myAnswer}`;
+          if (question && partnerAnswer) return `Q: ${question} | Partner answer: ${partnerAnswer}`;
+          return myAnswer || partnerAnswer || '';
+        })
+        .filter(Boolean)
+        .slice(0, 3);
+
+      const vaultRef = collection(db, 'vault', coupleData.coupleCode, 'items');
+      const vaultQuery = query(vaultRef, orderBy('timestamp', 'desc'), limit(40));
+      const vaultSnapshot = await getDocs(vaultQuery);
+      const recentVaultLetters = vaultSnapshot.docs
+        .map((snapshotDoc) => snapshotDoc.data())
+        .filter((item: any) => item?.type === 'letter' && typeof item?.content === 'string')
+        .map((item: any) => {
+          const title = safeSnippet(item.title, 60);
+          const body = safeSnippet(item.content, 170);
+          if (!body) return '';
+          return title ? `${title}: ${body}` : body;
+        })
+        .filter(Boolean)
+        .slice(0, 3);
+
+      const sharedDiaryRef = collection(db, 'sharedDiary');
+      const sharedDiaryQuery = query(
+        sharedDiaryRef,
+        where('coupleCode', '==', coupleData.coupleCode),
+        orderBy('timestamp', 'desc'),
+        limit(40)
+      );
+      const sharedDiarySnapshot = await getDocs(sharedDiaryQuery);
+      const recentSharedDiaryTexts = sharedDiarySnapshot.docs
+        .map((snapshotDoc) => snapshotDoc.data())
+        .filter((entry: any) => entry?.type === 'text' && typeof entry?.content === 'string')
+        .map((entry: any) => {
+          const author = safeSnippet(entry.author, 30);
+          const text = safeSnippet(entry.content, 170);
+          if (!text) return '';
+          return author ? `${author}: ${text}` : text;
+        })
+        .filter(Boolean)
+        .slice(0, 4);
 
       setCoupleContext({
         nickname: coupleData.nickname,
-        partnerNickname,        coupleCode: coupleData.coupleCode,        recentMessages: recentMessages.slice(0, 5),
-        recentParagraphs: recentParagraphs.slice(0, 3),
+        partnerNickname,
+        coupleCode: coupleData.coupleCode,
+        recentMessages,
+        recentParagraphs: recentDailyWritingAnswers.slice(0, 3),
+        recentDailyWritingAnswers,
+        recentDeepTalkAnswers,
+        recentVaultLetters,
+        recentSharedDiaryTexts,
       });
     } catch (error) {
       console.error('Error loading couple context:', error);
@@ -139,7 +334,10 @@ export default function EchoScreen() {
 
     try {
       const echoChatsRef = collection(db, 'couples', coupleData.coupleCode, 'echoChats');
-      const echoChatsQuery = query(echoChatsRef, orderBy('timestamp', 'asc'));
+      const echoChatsQuery = query(
+        echoChatsRef,
+        where('ownerNickname', '==', coupleData.nickname)
+      );
       const echoChatsSnapshot = await getDocs(echoChatsQuery);
       
       const loadedMessages: EchoMessage[] = echoChatsSnapshot.docs.map(doc => ({
@@ -147,13 +345,13 @@ export default function EchoScreen() {
         content: doc.data().content,
         isEcho: doc.data().isEcho,
         timestamp: doc.data().timestamp?.toDate() || new Date(),
-      }));
+      })).sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
       if (loadedMessages.length === 0) {
         // Show welcome message if no previous chats
         const welcomeMessage: EchoMessage = {
           id: 'welcome',
-          content: `Hello ${coupleData?.nickname}! I'm Echo, your AI memory keeper. I've been learning about your relationship through your chats, writings, and shared moments. Ask me about your memories, or just chat about how you're feeling! 💕`,
+          content: `Hello ${coupleData?.nickname}! I'm ${echoConfig.echoDisplayName || 'Echo'}, your AI memory keeper. I've been learning about your relationship through your chats, writings, and shared moments. Ask me about your memories, or just chat about how you're feeling! 💕`,
           isEcho: true,
           timestamp: new Date(),
         };
@@ -173,7 +371,7 @@ export default function EchoScreen() {
       // Show welcome message as fallback
       const welcomeMessage: EchoMessage = {
         id: 'welcome',
-        content: `Hello ${coupleData?.nickname}! I'm Echo, your AI memory keeper. I've been learning about your relationship through your chats, writings, and shared moments. Ask me about your memories, or just chat about how you're feeling! 💕`,
+        content: `Hello ${coupleData?.nickname}! I'm ${echoConfig.echoDisplayName || 'Echo'}, your AI memory keeper. I've been learning about your relationship through your chats, writings, and shared moments. Ask me about your memories, or just chat about how you're feeling! 💕`,
         isEcho: true,
         timestamp: new Date(),
       };
@@ -183,6 +381,12 @@ export default function EchoScreen() {
 
   const sendMessage = async () => {
     if (!inputText.trim() || !coupleData) return;
+
+    if (!isEchoConfigComplete(echoConfig)) {
+      setDraftEchoConfig(echoConfig);
+      setIsConfigModalVisible(true);
+      return;
+    }
 
     const userMessage: EchoMessage = {
       id: Date.now().toString(),
@@ -202,6 +406,10 @@ export default function EchoScreen() {
       ...coupleContext,
       nickname: coupleData.nickname,
       coupleCode: coupleData.coupleCode,
+      echoDisplayName: echoConfig.echoDisplayName,
+      echoStyle: echoConfig.partnerStyle,
+      echoFocus: echoConfig.questionFocus,
+      echoBoundaries: echoConfig.avoidTopics,
     };
 
     try {
@@ -210,6 +418,7 @@ export default function EchoScreen() {
       await addDoc(echoChatsRef, {
         content: currentInput,
         isEcho: false,
+        ownerNickname: coupleData.nickname,
         timestamp: serverTimestamp(),
       });
 
@@ -229,6 +438,7 @@ export default function EchoScreen() {
       await addDoc(echoChatsRef, {
         content: echoResponseContent,
         isEcho: true,
+        ownerNickname: coupleData.nickname,
         timestamp: serverTimestamp(),
       });
       
@@ -320,10 +530,85 @@ export default function EchoScreen() {
           </TouchableOpacity>
           <View style={styles.headerInfo}>
             <Bot size={24} color="#ffffff" />
-            <Text style={styles.headerTitle}>Echo AI 🤖</Text>
+            <Text style={styles.headerTitle}>{echoConfig.echoDisplayName || 'Echo'} AI 🤖</Text>
           </View>
-          <View style={styles.headerSpacer} />
+          <TouchableOpacity
+            style={styles.settingsButton}
+            onPress={() => {
+              setDraftEchoConfig(echoConfig);
+              setIsConfigModalVisible(true);
+            }}
+          >
+            <Settings size={20} color="#ffffff" />
+          </TouchableOpacity>
         </Animated.View>
+
+        <Modal visible={isConfigModalVisible} animationType="slide" transparent>
+          <View style={styles.configModalOverlay}>
+            <View style={styles.configModalCard}>
+              <Text style={styles.configTitle}>Customize Your Echo</Text>
+              <Text style={styles.configSubtitle}>Set how Echo should act like your partner and what it should ask.</Text>
+
+              <TextInput
+                style={styles.configInput}
+                placeholder="Echo name (optional)"
+                placeholderTextColor="#999"
+                value={draftEchoConfig.echoDisplayName}
+                onChangeText={(text) => setDraftEchoConfig((prev) => ({ ...prev, echoDisplayName: text }))}
+                maxLength={40}
+              />
+              <TextInput
+                style={styles.configInput}
+                placeholder="How should Echo act? (required)"
+                placeholderTextColor="#999"
+                value={draftEchoConfig.partnerStyle}
+                onChangeText={(text) => setDraftEchoConfig((prev) => ({ ...prev, partnerStyle: text }))}
+                maxLength={180}
+              />
+              <TextInput
+                style={styles.configInput}
+                placeholder="What should Echo ask about often? (required)"
+                placeholderTextColor="#999"
+                value={draftEchoConfig.questionFocus}
+                onChangeText={(text) => setDraftEchoConfig((prev) => ({ ...prev, questionFocus: text }))}
+                maxLength={200}
+              />
+              <TextInput
+                style={[styles.configInput, styles.configInputMultiline]}
+                placeholder="Anything Echo should avoid? (optional)"
+                placeholderTextColor="#999"
+                value={draftEchoConfig.avoidTopics}
+                onChangeText={(text) => setDraftEchoConfig((prev) => ({ ...prev, avoidTopics: text }))}
+                multiline
+                maxLength={240}
+              />
+
+              <View style={styles.configActions}>
+                <TouchableOpacity
+                  style={[styles.configActionButton, styles.configCancelButton]}
+                  onPress={() => {
+                    if (!isEchoConfigComplete(echoConfig)) return;
+                    setIsConfigModalVisible(false);
+                  }}
+                  disabled={isSavingConfig || !isEchoConfigComplete(echoConfig)}
+                >
+                  <Text style={styles.configCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.configActionButton, styles.configSaveButton]}
+                  onPress={saveEchoConfig}
+                  disabled={isSavingConfig}
+                >
+                  {isSavingConfig ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <Text style={styles.configSaveText}>Save</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         <KeyboardAvoidingView
           style={styles.chatContainer}
@@ -376,7 +661,7 @@ export default function EchoScreen() {
               <TouchableOpacity
                 style={[styles.sendButton, !inputText.trim() && styles.sendButtonDisabled]}
                 onPress={sendMessage}
-                disabled={!inputText.trim() || isTyping}
+                disabled={!inputText.trim() || isTyping || isLoadingConfig}
               >
                 <LinearGradient
                   colors={['#74b9ff', '#0984e3']}
@@ -423,6 +708,84 @@ const styles = StyleSheet.create({
   },
   headerSpacer: {
     width: 32,
+  },
+  settingsButton: {
+    padding: 6,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  configModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  configModalCard: {
+    width: '100%',
+    maxWidth: 520,
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 18,
+  },
+  configTitle: {
+    fontSize: 20,
+    fontFamily: 'Inter-SemiBold',
+    color: '#1f2937',
+  },
+  configSubtitle: {
+    marginTop: 6,
+    marginBottom: 14,
+    fontSize: 13,
+    fontFamily: 'Inter-Regular',
+    color: '#6b7280',
+    lineHeight: 18,
+  },
+  configInput: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#f9fafb',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontFamily: 'Inter-Regular',
+    color: '#111827',
+    marginBottom: 10,
+  },
+  configInputMultiline: {
+    minHeight: 86,
+    textAlignVertical: 'top',
+  },
+  configActions: {
+    marginTop: 8,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  configActionButton: {
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    minWidth: 88,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  configCancelButton: {
+    backgroundColor: '#f3f4f6',
+  },
+  configSaveButton: {
+    backgroundColor: '#2563eb',
+  },
+  configCancelText: {
+    color: '#374151',
+    fontSize: 14,
+    fontFamily: 'Inter-Medium',
+  },
+  configSaveText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontFamily: 'Inter-SemiBold',
   },
   chatContainer: {
     flex: 1,

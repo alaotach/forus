@@ -15,8 +15,8 @@ import { Sparkles, Smile, MessageSquare, Calendar, Bot, Settings, LogOut, Target
 import { useCouple } from '@/hooks/useCouple';
 import { useRouter } from 'expo-router';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
-import { auth, db } from '@/services/firebase';
-import { signOut } from 'firebase/auth';
+import { db } from '@/services/firebase';
+import { logoutUser } from '@/services/auth';
 import { AdBanner } from '@/components/AdBanner';
 import { getSubscription, shouldShowAds, SubscriptionData } from '@/services/subscriptions';
 
@@ -60,7 +60,28 @@ export default function MoreScreen() {
     }
   }, [coupleData]);
 
+  const performLogout = async () => {
+    try {
+      await clearCoupleData();
+      await logoutUser();
+      router.replace('/(auth)/auth');
+    } catch (error) {
+      console.error('Logout failed:', error);
+      Alert.alert('Error', 'Unable to log out right now.');
+    }
+  };
+
   const handleLogout = () => {
+    if (Platform.OS === 'web') {
+      const proceed = typeof globalThis.confirm === 'function'
+        ? globalThis.confirm('Are you sure you want to disconnect from your couple space?')
+        : true;
+      if (proceed) {
+        performLogout();
+      }
+      return;
+    }
+
     Alert.alert(
       'Disconnect',
       'Are you sure you want to disconnect from your couple space?',
@@ -69,11 +90,7 @@ export default function MoreScreen() {
         {
           text: 'Disconnect',
           style: 'destructive',
-          onPress: async () => {
-            await clearCoupleData();
-            await signOut(auth);
-            router.replace('/(auth)/auth');
-          }
+          onPress: performLogout,
         }
       ]
     );
@@ -113,6 +130,19 @@ export default function MoreScreen() {
         user: coupleData.nickname,
         timestamp: serverTimestamp(),
       });
+
+      try {
+        const moodEmoji = moods.find((item) => item.label === selectedMood)?.emoji || '😊';
+        const { notifyMoodChanged } = await import('@/services/notifications');
+        await notifyMoodChanged(
+          coupleData.coupleCode,
+          coupleData.nickname,
+          selectedMood,
+          moodEmoji
+        );
+      } catch (error) {
+        console.warn('Mood notification error:', error);
+      }
 
       setShowMoodModal(false);
       setSelectedMood(null);
@@ -182,6 +212,15 @@ export default function MoreScreen() {
       emoji: '💭',
       colors: ['#e17055', '#d63031'],
       route: '/deep-talk'
+    },
+    {
+      id: 'live-widget',
+      title: 'Shared Live Widget',
+      subtitle: 'Photo + doodle + caption synced for both',
+      icon: Sparkles,
+      emoji: '🖼️',
+      colors: ['#ff8fab', '#ffb86c'],
+      route: '/live-widget'
     }
   ];
 

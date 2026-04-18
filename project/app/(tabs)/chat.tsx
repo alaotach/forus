@@ -13,6 +13,7 @@ import {
   Alert,
   Modal,
   ActivityIndicator,
+  PermissionsAndroid,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -36,7 +37,6 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { ChatMessage } from '@/types/app';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import { uploadPhotoMedia, uploadAudioMedia } from '@/services/mediaUpload';
 import { streamAndCacheMedia, getCachedFile } from '@/services/media';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -127,12 +127,11 @@ export default function ChatScreen() {
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [isTyping, setIsTyping] = useState(false);
   const [isScreenFocused, setIsScreenFocused] = useState(false);
-  const [showCamera, setShowCamera] = useState(false);
   const [selectedImageUrl, setSelectedImageUrl] = useState<string | null>(null);
   const [selectedImageMessage, setSelectedImageMessage] = useState<ChatMessage | null>(null);
   const [imageReplyText, setImageReplyText] = useState('');
-  const [cameraType, setCameraType] = useState<CameraType>('back');
   const [isRecording, setIsRecording] = useState(false);
+  const [isRecordingPaused, setIsRecordingPaused] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [playingAudio, setPlayingAudio] = useState<{ [key: string]: any }>({});
   const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
@@ -148,15 +147,12 @@ export default function ChatScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const mounted = useRef(true);
   const recordingTimer = useRef<NodeJS.Timeout | null>(null);
-  const cameraRef = useRef<CameraView>(null);
-  
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+
   const [audioPermission, setAudioPermission] = useState<boolean>(false);
   const QUICK_REACTIONS = ['❤️', '😍', '😂', '😮', '😢', '🙏'];
   const isUploadingOutgoingMedia = uploadingMediaKind !== null;
 
-  // Audio recorder setup with modern Expo Audio
-  const recorder = useAudioRecorder({
+  const recordingOptions = {
     android: {
       extension: '.m4a',
       outputFormat: 'mpeg4',
@@ -180,7 +176,10 @@ export default function ChatScreen() {
       mimeType: 'audio/webm',
       bitsPerSecond: 128000,
     },
-  });
+  };
+
+  // Audio recorder setup with explicit options to avoid undefined web defaults.
+  const recorder = useAudioRecorder(recordingOptions as any);
 
   // Handle screen focus for proper navigation
   useFocusEffect(
@@ -219,16 +218,48 @@ export default function ChatScreen() {
     };
   }, [isConnected, isLoading, coupleData, isScreenFocused]);
 
-  const requestAudioPermission = async () => {
+  const requestAudioPermission = async (): Promise<boolean> => {
     try {
+      if (Platform.OS === 'android') {
+        const androidPermission = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message: 'Forus needs microphone access to record voice messages.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Deny',
+          }
+        );
+
+        if (androidPermission !== PermissionsAndroid.RESULTS.GRANTED) {
+          setAudioPermission(false);
+          return false;
+        }
+      }
+
+      const requestRecordingPermissions =
+        (Audio as any)?.requestRecordingPermissionsAsync ||
+        (Audio as any)?.requestPermissionsAsync;
+
+      if (typeof requestRecordingPermissions === 'function') {
+        const permission = await requestRecordingPermissions();
+        const granted = permission?.granted === true || permission?.status === 'granted';
+        if (!granted) {
+          setAudioPermission(false);
+          return false;
+        }
+      }
+
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
       });
       setAudioPermission(true);
+      return true;
     } catch (error) {
       console.error('Error setting audio mode:', error);
       setAudioPermission(false);
+      return false;
     }
   };
 
@@ -436,8 +467,8 @@ export default function ChatScreen() {
         });
       }
     } else {
-      // Mobile: You could integrate with expo-notifications here
-      console.log('New message notification:', message.sender, message.message);
+      // While the user is already on chat, avoid showing interruptive local banners.
+      console.log('New message received in active chat:', message.sender);
     }
   };
 
@@ -598,6 +629,14 @@ export default function ChatScreen() {
         });
       })
     );
+
+    // Keep the tab badge in sync once user has viewed chat.
+    try {
+      const { markNotificationsAsRead } = await import('@/services/notifications');
+      await markNotificationsAsRead(coupleData.coupleCode, coupleData.nickname);
+    } catch {
+      // non-blocking
+    }
   };
 
   const openMessageSelection = (message: ChatMessage) => {
@@ -633,8 +672,18 @@ export default function ChatScreen() {
 
   const handleCopy = async () => {
     if (!selectedMessage || selectedMessage.type !== 'text') return;
-    await Clipboard.setStringAsync(selectedMessage.message);
-    clearSelection();
+    try {
+      const setStringSync = (Clipboard as any).setString;
+      if (typeof setStringSync === 'function') {
+        setStringSync(selectedMessage.message);
+      } else {
+        await Clipboard.setStringAsync(selectedMessage.message);
+      }
+      clearSelection();
+    } catch (error) {
+      console.error('Error copying message:', error);
+      Alert.alert('Copy Failed', 'Unable to copy message right now.');
+    }
   };
 
   const handleEdit = () => {
@@ -698,42 +747,23 @@ export default function ChatScreen() {
     setTimeout(() => setHighlightedMessageId(null), 1200);
   };
 
-  const openCamera = async () => {
-    if (isUploadingOutgoingMedia) return;
-    if (!cameraPermission?.granted) {
-      const permission = await requestCameraPermission();
-      if (!permission.granted) {
-        Alert.alert('Camera Permission', 'Camera access is needed to take photos');
-        return;
-      }
-    }
-    setShowCamera(true);
-  };
-
-  const takePicture = async () => {
-    if (!cameraRef.current) return;
-
-    try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.7,
-        base64: false,
-      });
-
-      setShowCamera(false);
-      await uploadAndSendMedia(photo.uri, 'image');
-    } catch (error) {
-      console.error('Error taking picture:', error);
-      Alert.alert('Error', 'Failed to take picture');
-    }
-  };
-
   const launchImagePicker = async (withEditing: boolean) => {
     try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: withEditing,
-        quality: 0.9,
-      });
+      let result;
+      try {
+        result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ['images'],
+          allowsEditing: withEditing,
+          quality: 0.9,
+        });
+      } catch (pickerError: any) {
+        const message = String(pickerError?.message || pickerError || '');
+        if (message.includes('ImagePickerOptions') || message.includes('Built-in class kotlin.Any is not found')) {
+          result = await ImagePicker.launchImageLibraryAsync();
+        } else {
+          throw pickerError;
+        }
+      }
 
       if (!result.canceled && result.assets[0]) {
         await uploadAndSendMedia(result.assets[0].uri, 'image');
@@ -774,11 +804,30 @@ export default function ChatScreen() {
         return;
       }
 
+      if (isRecording && isRecordingPaused) {
+        recorder.record();
+        setIsRecordingPaused(false);
+        recordingTimer.current = setInterval(() => {
+          setRecordingDuration(prev => prev + 1);
+        }, 1000);
+        return;
+      }
+
+      if (isRecording) return;
+
+      const hasPermission = audioPermission || await requestAudioPermission();
+      if (!hasPermission) {
+        Alert.alert('Permission needed', 'Microphone permission is required to record audio.');
+        return;
+      }
+
       console.log('Starting chat recording...');
-      await recorder.prepareToRecordAsync();
+      await recorder.prepareToRecordAsync(recordingOptions as any);
       recorder.record();
       
       setIsRecording(true);
+      setIsRecordingPaused(false);
+      setCurrentRecordingUri(null);
       setRecordingDuration(0);
 
       // Start timer
@@ -788,6 +837,28 @@ export default function ChatScreen() {
     } catch (error: any) {
       console.error('Error starting recording:', error);
       Alert.alert('Error', `Failed to start recording: ${error}`);
+    }
+  };
+
+  const pauseRecording = async () => {
+    if (!recorder || !isRecording || isRecordingPaused) return;
+
+    try {
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
+        recordingTimer.current = null;
+      }
+
+      if (typeof (recorder as any).pause === 'function') {
+        await (recorder as any).pause();
+      } else {
+        await recorder.stop();
+      }
+
+      setIsRecordingPaused(true);
+    } catch (error) {
+      console.error('Error pausing recording:', error);
+      Alert.alert('Error', `Failed to pause recording: ${error}`);
     }
   };
 
@@ -808,16 +879,28 @@ export default function ChatScreen() {
       if (recordingURI) {
         setCurrentRecordingUri(recordingURI);
         console.log('Recording saved to:', recordingURI);
-        await uploadAndSendMedia(recordingURI, 'audio');
-        setCurrentRecordingUri(null);
       }
       
       setIsRecording(false);
-      setRecordingDuration(0);
+      setIsRecordingPaused(false);
     } catch (error) {
       console.error('Error stopping recording:', error);
       Alert.alert('Error', `Failed to stop recording: ${error}`);
       setIsRecording(false);
+      setIsRecordingPaused(false);
+    }
+  };
+
+  const sendRecordedAudio = async () => {
+    if (!currentRecordingUri || isUploadingOutgoingMedia) return;
+
+    try {
+      await uploadAndSendMedia(currentRecordingUri, 'audio');
+      setCurrentRecordingUri(null);
+      setRecordingDuration(0);
+    } catch (error) {
+      console.error('Error sending recorded audio:', error);
+      Alert.alert('Error', `Failed to send recording: ${error}`);
     }
   };
 
@@ -1358,6 +1441,10 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
   const renderMessage = ({ item, index }: { item: ChatMessage; index: number }) => {
     const isMyMessage = item.sender === coupleData?.nickname;
     const isSelected = selectedMessage?.id === item.id;
+    const estimatedWebTextBubbleWidth =
+      Platform.OS === 'web' && item.type === 'text'
+        ? Math.min(560, Math.max(120, (item.message?.length || 0) * 7 + 34))
+        : undefined;
     
     return (
       <Animated.View 
@@ -1389,6 +1476,7 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
           delayLongPress={240}
           style={[
             styles.messageBubble,
+            estimatedWebTextBubbleWidth ? { width: estimatedWebTextBubbleWidth } : null,
             isMyMessage ? styles.myMessage : styles.theirMessage,
             item.type === 'audio' && styles.audioOnlyBubble,
           ]}
@@ -1793,11 +1881,28 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
             )}
             {isRecording && (
               <View style={styles.recordingIndicator}>
-                <View style={styles.recordingDot} />
-                <Text style={styles.recordingText}>Recording... {formatDuration(recordingDuration)}</Text>
+                {!isRecordingPaused && <View style={styles.recordingDot} />}
+                <Text style={styles.recordingText}>
+                  {isRecordingPaused ? 'Paused' : 'Recording...'} {formatDuration(recordingDuration)}
+                </Text>
+                <TouchableOpacity
+                  onPress={isRecordingPaused ? startRecording : pauseRecording}
+                  style={styles.pauseResumeButton}
+                >
+                  {isRecordingPaused ? (
+                    <Play size={16} color="#ff6b6b" />
+                  ) : (
+                    <Pause size={16} color="#ff6b6b" />
+                  )}
+                </TouchableOpacity>
                 <TouchableOpacity onPress={stopRecording} style={styles.stopRecordingButton}>
                   <Square size={16} color="#ff6b6b" fill="#ff6b6b" />
                 </TouchableOpacity>
+              </View>
+            )}
+            {!isRecording && currentRecordingUri && (
+              <View style={styles.recordingIndicator}>
+                <Text style={styles.recordingText}>Voice clip ready • {formatDuration(recordingDuration)}</Text>
               </View>
             )}
             {isUploadingOutgoingMedia && (
@@ -1831,17 +1936,22 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
               
               <TouchableOpacity 
                 style={[styles.mediaButton, isUploadingOutgoingMedia && styles.mediaButtonDisabled]} 
-                onPress={isRecording ? stopRecording : startRecording}
-                onLongPress={startRecording}
+                onPress={isRecording ? (isRecordingPaused ? startRecording : pauseRecording) : startRecording}
                 disabled={isUploadingOutgoingMedia}
               >
                 <Mic size={20} color={isRecording ? "#ff6b6b" : "#ff6b9d"} />
               </TouchableOpacity>
               
               <TouchableOpacity
-                style={[styles.sendButton, !inputText.trim() && styles.sendButtonDisabled]}
-                onPress={() => sendMessage()}
-                disabled={!inputText.trim() || isRecording || isUploadingOutgoingMedia}
+                style={[styles.sendButton, !inputText.trim() && !currentRecordingUri && styles.sendButtonDisabled]}
+                onPress={() => {
+                  if (inputText.trim()) {
+                    void sendMessage();
+                  } else if (currentRecordingUri) {
+                    void sendRecordedAudio();
+                  }
+                }}
+                disabled={(!inputText.trim() && !currentRecordingUri) || isRecording || isUploadingOutgoingMedia}
               >
                 <LinearGradient
                   colors={['#ff6b9d', '#c44569']}
@@ -1853,44 +1963,6 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
             </View>
           </Animated.View>
         </KeyboardAvoidingView>
-
-        {/* Camera Modal */}
-        <Modal visible={showCamera} animationType="slide">
-          <View style={styles.cameraContainer}>
-            <CameraView
-              ref={cameraRef}
-              style={styles.camera}
-              facing={cameraType}
-            >
-              <View style={styles.cameraOverlay}>
-                <TouchableOpacity
-                  style={styles.cameraCloseButton}
-                  onPress={() => setShowCamera(false)}
-                >
-                  <X size={24} color="#ffffff" />
-                </TouchableOpacity>
-                
-                <View style={styles.cameraControls}>
-                  <TouchableOpacity
-                    style={styles.cameraFlipButton}
-                    onPress={() => setCameraType(current => current === 'back' ? 'front' : 'back')}
-                  >
-                    <Text style={styles.cameraButtonText}>Flip</Text>
-                  </TouchableOpacity>
-                  
-                  <TouchableOpacity
-                    style={styles.cameraCaptureButton}
-                    onPress={takePicture}
-                  >
-                    <View style={styles.cameraCaptureInner} />
-                  </TouchableOpacity>
-                  
-                  <View style={styles.cameraPlaceholder} />
-                </View>
-              </View>
-            </CameraView>
-          </View>
-        </Modal>
 
         <Modal
           visible={!!selectedImageUrl}
@@ -2123,7 +2195,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   messageBubble: {
-    maxWidth: '92%',
+    maxWidth: Platform.OS === 'web' ? '90%' : '92%',
     borderRadius: 8,
     paddingVertical: 8,
     paddingHorizontal: 10,
@@ -2302,6 +2374,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Inter-Regular',
     marginRight: 6,
+    flexShrink: 0,
   },
   myMessageTime: {
     color: '#ffffff',
@@ -2596,6 +2669,10 @@ const styles = StyleSheet.create({
   },
   stopRecordingButton: {
     padding: 4,
+  },
+  pauseResumeButton: {
+    padding: 4,
+    marginRight: 6,
   },
   inputWrapper: {
     flexDirection: 'row',

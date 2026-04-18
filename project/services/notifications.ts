@@ -1,15 +1,70 @@
 import { db } from './firebase';
-import { doc, setDoc, getDoc, collection, query, where, onSnapshot, serverTimestamp, updateDoc } from 'firebase/firestore';
-import { useNotificationContext } from '@/components/NotificationProvider';
+import { doc, setDoc, collection, query, where, onSnapshot, serverTimestamp, updateDoc, getDocs, getDoc } from 'firebase/firestore';
+import { Platform } from 'react-native';
+
+const PUSH_SEND_LOG_PREFIX = '[push-send]';
+const OS_FALLBACK_LOG_PREFIX = '[os-fallback]';
+const localFallbackSeenIds = new Set<string>();
+let Notifications: any;
+
+try {
+  Notifications = require('expo-notifications');
+} catch {
+  Notifications = null;
+}
 
 export interface NotificationEvent {
-  type: 'message' | 'paragraph' | 'memory' | 'streak' | 'milestone' | 'echo' | 'goal' | 'mood';
+  type: 'message' | 'paragraph' | 'memory' | 'streak' | 'milestone' | 'echo' | 'goal' | 'mood' | 'deep-question' | 'shared-diary' | 'widget-update';
   coupleCode: string;
   title: string;
   body: string;
   from?: string;
   timestamp: any;
   read: boolean;
+}
+
+function rememberLocalFallbackId(id: string) {
+  localFallbackSeenIds.add(id);
+  if (localFallbackSeenIds.size > 500) {
+    const oldest = localFallbackSeenIds.values().next().value;
+    if (oldest) {
+      localFallbackSeenIds.delete(oldest);
+    }
+  }
+}
+
+async function maybeScheduleLocalOsFallback(notification: NotificationEvent & { id: string }) {
+  try {
+    if (!Notifications || Platform.OS === 'web') return;
+    if (!notification?.id) return;
+    if (localFallbackSeenIds.has(notification.id)) return;
+
+    rememberLocalFallbackId(notification.id);
+
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: notification.title || 'New update',
+        body: notification.body || 'You have a new notification',
+        sound: 'default',
+        data: {
+          id: notification.id,
+          type: notification.type,
+          coupleCode: notification.coupleCode,
+          from: notification.from || 'System',
+          source: 'firestore-local-fallback',
+        },
+        ...(Platform.OS === 'android' ? { channelId: 'default' } : {}),
+      },
+      trigger: null,
+    });
+
+    console.log(`${OS_FALLBACK_LOG_PREFIX} scheduled`, {
+      id: notification.id,
+      type: notification.type,
+    });
+  } catch (error) {
+    console.warn(`${OS_FALLBACK_LOG_PREFIX} failed`, error);
+  }
 }
 
 export async function sendNotification(
@@ -32,9 +87,131 @@ export async function sendNotification(
       read: false,
     });
 
+    await dispatchExpoPushNotifications(coupleCode, {
+      title,
+      body,
+      from,
+      type,
+    });
+
     console.log(`Notification sent: ${title}`);
   } catch (error) {
     console.error('Error sending notification:', error);
+  }
+}
+
+async function dispatchExpoPushNotifications(
+  coupleCode: string,
+  payload: {
+    title?: string;
+    body?: string;
+    type: NotificationEvent['type'];
+    from?: string;
+    silent?: boolean;
+  }
+) {
+  try {
+    const coupleRef = doc(db, 'couples', coupleCode);
+    const coupleSnap = await getDoc(coupleRef);
+    if (!coupleSnap.exists()) {
+      console.log(`${PUSH_SEND_LOG_PREFIX} couple-doc-missing`, { coupleCode, type: payload.type });
+      return;
+    }
+
+    const coupleData = coupleSnap.data() as any;
+    const pushTokens = (coupleData?.pushTokens || {}) as Record<string, string>;
+
+    const recipientTokens = Object.entries(pushTokens)
+      .filter(([nickname, token]) => nickname !== payload.from && typeof token === 'string' && token.trim().length > 0)
+      .map(([, token]) => token.trim())
+      .filter((token, index, arr) => arr.indexOf(token) === index);
+
+    console.log(`${PUSH_SEND_LOG_PREFIX} recipients-resolved`, {
+      coupleCode,
+      type: payload.type,
+      from: payload.from || 'System',
+      pushTokenOwners: Object.keys(pushTokens),
+      recipientCount: recipientTokens.length,
+    });
+
+    if (recipientTokens.length === 0) {
+      console.log(`${PUSH_SEND_LOG_PREFIX} no-recipient-token`, {
+        coupleCode,
+        type: payload.type,
+        from: payload.from || 'System',
+      });
+      return;
+    }
+
+    const messages = recipientTokens.map((to) => {
+      const baseMessage: any = {
+        to,
+        priority: 'high',
+        data: {
+          type: payload.type,
+          coupleCode,
+          from: payload.from || 'System',
+        },
+      };
+
+      if (payload.silent) {
+        baseMessage.contentAvailable = true;
+      } else {
+        baseMessage.title = payload.title;
+        baseMessage.body = payload.body;
+        baseMessage.sound = 'default';
+        baseMessage.channelId = 'default';
+      }
+
+      return baseMessage;
+    });
+
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Accept-encoding': 'gzip, deflate',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(messages),
+    });
+
+    const body = await response.json().catch(() => null);
+
+    console.log(`${PUSH_SEND_LOG_PREFIX} expo-response`, {
+      coupleCode,
+      type: payload.type,
+      status: response.status,
+      ok: response.ok,
+      dataLength: Array.isArray(body?.data) ? body.data.length : 0,
+    });
+
+    if (!response.ok) {
+      console.warn('Expo push API returned non-OK response:', response.status, body);
+      return;
+    }
+
+    const ticketData = Array.isArray(body?.data) ? body.data : [];
+    ticketData.forEach((ticket: any, index: number) => {
+      console.log(`${PUSH_SEND_LOG_PREFIX} expo-ticket`, {
+        token: recipientTokens[index],
+        status: ticket?.status,
+        id: ticket?.id,
+        message: ticket?.message,
+      });
+    });
+
+    ticketData.forEach((ticket: any, index: number) => {
+      if (ticket?.status === 'error') {
+        console.warn('Expo push ticket error:', {
+          token: recipientTokens[index],
+          details: ticket?.details,
+          message: ticket?.message,
+        });
+      }
+    });
+  } catch (error) {
+    console.error('Error dispatching Expo push notifications:', error);
   }
 }
 
@@ -45,8 +222,11 @@ export function subscribeToNotifications(
 ) {
   const notifRef = collection(db, 'notifications', coupleCode, 'events');
   const q = query(notifRef, where('read', '==', false));
+  let isInitialSnapshot = true;
 
   const unsubscribe = onSnapshot(q, (snapshot) => {
+    const shouldRunFallbackForThisSnapshot = !isInitialSnapshot;
+
     snapshot.docChanges().forEach((change) => {
       if (change.type === 'added') {
         const notification = {
@@ -58,11 +238,76 @@ export function subscribeToNotifications(
         if (currentNickname && notification.from === currentNickname) return;
 
         onNotification(notification);
+
+        // Avoid replaying old unread docs on first snapshot; only use fallback for truly new arrivals.
+        if (shouldRunFallbackForThisSnapshot) {
+          void maybeScheduleLocalOsFallback(notification);
+        }
       }
     });
+
+    if (isInitialSnapshot) {
+      isInitialSnapshot = false;
+    }
   });
 
   return unsubscribe;
+}
+
+export async function markNotificationsAsRead(coupleCode: string, currentNickname?: string) {
+  try {
+    const notifRef = collection(db, 'notifications', coupleCode, 'events');
+    const unreadQuery = query(notifRef, where('read', '==', false));
+    const snapshot = await getDocs(unreadQuery);
+
+    const updates = snapshot.docs
+      .map((entry) => ({ id: entry.id, ...(entry.data() as any) }))
+      .filter((entry) => !currentNickname || entry.from !== currentNickname)
+      .map((entry) =>
+        updateDoc(doc(db, 'notifications', coupleCode, 'events', entry.id), {
+          read: true,
+          readAt: serverTimestamp(),
+        })
+      );
+
+    if (updates.length > 0) {
+      await Promise.all(updates);
+    }
+  } catch (error) {
+    console.error('Error marking notifications as read:', error);
+  }
+}
+
+export async function markNotificationsAsReadByTypes(
+  coupleCode: string,
+  types: NotificationEvent['type'][],
+  currentNickname?: string
+) {
+  try {
+    if (!Array.isArray(types) || types.length === 0) return;
+
+    const allowedTypes = new Set(types.map((type) => String(type)));
+    const notifRef = collection(db, 'notifications', coupleCode, 'events');
+    const unreadQuery = query(notifRef, where('read', '==', false));
+    const snapshot = await getDocs(unreadQuery);
+
+    const updates = snapshot.docs
+      .map((entry) => ({ id: entry.id, ...(entry.data() as any) }))
+      .filter((entry) => !currentNickname || entry.from !== currentNickname)
+      .filter((entry) => allowedTypes.has(String(entry.type || '')))
+      .map((entry) =>
+        updateDoc(doc(db, 'notifications', coupleCode, 'events', entry.id), {
+          read: true,
+          readAt: serverTimestamp(),
+        })
+      );
+
+    if (updates.length > 0) {
+      await Promise.all(updates);
+    }
+  } catch (error) {
+    console.error('Error marking notifications as read by type:', error);
+  }
 }
 
 // Notification triggers
@@ -82,14 +327,74 @@ export async function notifyNewMessage(
 
 export async function notifyDailyParagraph(
   coupleCode: string,
-  coupleNickname: string
+  senderName: string
 ) {
+  const today = new Date().toISOString().split('T')[0];
+  const paragraphsRef = collection(db, 'dailyParagraphs');
+  const completionQuery = query(
+    paragraphsRef,
+    where('coupleCode', '==', coupleCode),
+    where('date', '==', today)
+  );
+  const completionSnapshot = await getDocs(completionQuery);
+  const completedNicknames = new Set(
+    completionSnapshot.docs
+      .map((entry) => (entry.data() as any)?.nickname)
+      .filter((nickname) => typeof nickname === 'string' && nickname.trim().length > 0)
+  );
+
+  if (completedNicknames.size >= 2) {
+    return;
+  }
+
   await sendNotification(
     coupleCode,
     'paragraph',
-    '📝 Daily Writing Prompt',
-    `Your daily prompt is ready! Write your thoughts and share with ${coupleNickname} 💕`,
-    'System'
+    '📝 Partner wrote today',
+    `${senderName} wrote their daily paragraph. Write yours to unlock their writing 💕`,
+    senderName
+  );
+}
+
+export async function sendWidgetUpdatePush(coupleCode: string, from?: string) {
+  try {
+    await dispatchExpoPushNotifications(coupleCode, {
+      type: 'widget-update',
+      from,
+      silent: true,
+    });
+  } catch (error) {
+    console.error('Error sending widget-update push:', error);
+  }
+}
+
+export async function notifyDeepQuestionPrompt(
+  coupleCode: string,
+  senderName: string
+) {
+  const today = new Date().toISOString().split('T')[0];
+  const deepTalkRef = doc(db, 'deepTalks', coupleCode, 'items', today);
+  const deepTalkSnap = await getDoc(deepTalkRef);
+
+  if (deepTalkSnap.exists()) {
+    const deepTalkData = deepTalkSnap.data() as any;
+    const responses = deepTalkData?.responses || {};
+    const answeredCount = Object.values(responses).filter((entry: any) => {
+      const answer = entry?.answer;
+      return typeof answer === 'string' && answer.trim().length > 0;
+    }).length;
+
+    if (deepTalkData?.unlocked === true || answeredCount >= 2) {
+      return;
+    }
+  }
+
+  await sendNotification(
+    coupleCode,
+    'deep-question',
+    '💭 Deep question answered',
+    `${senderName} answered today's deep question. Write yours to unlock both responses 💕`,
+    senderName
   );
 }
 
@@ -110,6 +415,22 @@ export async function notifyMemory(
     'memory',
     `${typeEmoji[memoryType as keyof typeof typeEmoji]} New Memory`,
     `${senderName} added a new ${memoryType} to your vault 💕`,
+    senderName
+  );
+}
+
+export async function notifySharedDiaryEntry(
+  coupleCode: string,
+  senderName: string,
+  entryType: 'text' | 'image' | 'voice'
+) {
+  const entryLabel = entryType === 'voice' ? 'voice note' : entryType;
+
+  await sendNotification(
+    coupleCode,
+    'shared-diary',
+    '📔 Shared diary updated',
+    `${senderName} added a ${entryLabel} entry to your shared diary 💕`,
     senderName
   );
 }

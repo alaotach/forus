@@ -61,9 +61,17 @@ export interface CoupleContext {
   partnerNickname?: string;
   recentMessages?: string[];
   recentParagraphs?: string[];
+  recentDailyWritingAnswers?: string[];
+  recentDeepTalkAnswers?: string[];
+  recentVaultLetters?: string[];
+  recentSharedDiaryTexts?: string[];
   relationshipLength?: string;
   mood?: string;
   coupleCode?: string;
+  echoDisplayName?: string;
+  echoStyle?: string;
+  echoFocus?: string;
+  echoBoundaries?: string;
 }
 
 export async function generateDailyPrompt(context?: CoupleContext): Promise<string> {

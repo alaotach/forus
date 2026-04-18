@@ -245,13 +245,22 @@ export default function ParagraphScreen() {
           });
         }
 
-        // Send notification to partner
+        // Send partner notification only for today's first write and only if partner hasn't written yet.
         try {
-          const { notifyDailyParagraph } = await import('@/services/notifications');
-          await notifyDailyParagraph(coupleData.coupleCode, partnerNickname);
+          if (isToday && !partnerParagraph) {
+            const { notifyDailyParagraph } = await import('@/services/notifications');
+            await notifyDailyParagraph(coupleData.coupleCode, coupleData.nickname);
+          }
         } catch (error) {
           console.log('Notification error:', error);
         }
+      }
+
+      try {
+        const { refreshCompletionReminders } = await import('@/services/push-notifications');
+        await refreshCompletionReminders(coupleData.coupleCode, coupleData.nickname);
+      } catch {
+        // non-blocking
       }
 
       setIsEditing(true);

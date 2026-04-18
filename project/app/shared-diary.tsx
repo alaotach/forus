@@ -237,6 +237,14 @@ export default function SharedDiaryScreen() {
         reactions: {}
       };
       await addDoc(collection(db, 'sharedDiary'), entryData);
+
+      try {
+        const { notifySharedDiaryEntry } = await import('@/services/notifications');
+        await notifySharedDiaryEntry(coupleData.coupleCode, coupleData.nickname, 'text');
+      } catch (notifyError) {
+        console.log('Shared diary notification error:', notifyError);
+      }
+
       setTextContent('');
     } catch (error) {
       Alert.alert('Error', 'Failed to send message');
@@ -245,18 +253,38 @@ export default function SharedDiaryScreen() {
 
   const pickImage = async () => {
     if (!selectedDate) return;
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 0.8,
-    });
+    let result;
+    try {
+      result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.8,
+      });
+    } catch (pickerError: any) {
+      const message = String(pickerError?.message || pickerError || '');
+      if (message.includes('ImagePickerOptions') || message.includes('Built-in class kotlin.Any is not found')) {
+        result = await ImagePicker.launchImageLibraryAsync();
+      } else {
+        throw pickerError;
+      }
+    }
     if (!result.canceled && result.assets[0]) await uploadImage(result.assets[0].uri);
   };
 
   const takePhoto = async () => {
     if (!selectedDate) return;
-    const result = await ImagePicker.launchCameraAsync({
-      quality: 0.8,
-    });
+    let result;
+    try {
+      result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+      });
+    } catch (pickerError: any) {
+      const message = String(pickerError?.message || pickerError || '');
+      if (message.includes('ImagePickerOptions') || message.includes('Built-in class kotlin.Any is not found')) {
+        result = await ImagePicker.launchCameraAsync();
+      } else {
+        throw pickerError;
+      }
+    }
     if (!result.canceled && result.assets[0]) await uploadImage(result.assets[0].uri);
   };
 
@@ -277,6 +305,13 @@ export default function SharedDiaryScreen() {
         reactions: {}
       };
       await addDoc(collection(db, 'sharedDiary'), entryData);
+
+      try {
+        const { notifySharedDiaryEntry } = await import('@/services/notifications');
+        await notifySharedDiaryEntry(coupleData.coupleCode, coupleData.nickname, 'image');
+      } catch (notifyError) {
+        console.log('Shared diary notification error:', notifyError);
+      }
     } catch (error) {
       Alert.alert('Error', 'Failed to upload image');
     }
@@ -301,6 +336,13 @@ export default function SharedDiaryScreen() {
         reactions: {}
       };
       await addDoc(collection(db, 'sharedDiary'), entryData);
+
+      try {
+        const { notifySharedDiaryEntry } = await import('@/services/notifications');
+        await notifySharedDiaryEntry(coupleData.coupleCode, coupleData.nickname, 'voice');
+      } catch (notifyError) {
+        console.log('Shared diary notification error:', notifyError);
+      }
     } catch (error) {
       Alert.alert('Error', 'Failed to upload voice message');
     }
