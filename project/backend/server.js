@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const admin = require('firebase-admin');
 const mediaRoutes = require('./routes/mediaRoutes');
-const { listAllMediaMetadata, deleteMediaMetadataById } = require('./services/mediaMetadataService');
+const { listAllMediaMetadata, listMediaMetadataByOwner, deleteMediaMetadataById } = require('./services/mediaMetadataService');
 const { deleteMediaObject } = require('./services/s3Service');
 require('dotenv').config();
 
@@ -219,8 +219,28 @@ async function deleteDocumentRecursively(docRef) {
 }
 
 async function deleteUserMediaAssets(uid) {
-  const allMetadata = await listAllMediaMetadata();
-  const ownedMedia = allMetadata.filter((item) => item && item.ownerId === uid);
+  let ownedMedia = [];
+  const allowScanFallback = String(process.env.MEDIA_OWNER_QUERY_SCAN_FALLBACK || '')
+    .trim()
+    .toLowerCase() === 'true';
+
+  try {
+    ownedMedia = await listMediaMetadataByOwner(uid);
+  } catch (queryError) {
+    const message = String(queryError?.message || queryError || 'Unknown metadata query error');
+    const isIndexConfigIssue = message.includes('AWS_MEDIA_OWNER_INDEX is required');
+
+    if (allowScanFallback && isIndexConfigIssue) {
+      // Optional fallback for temporary migrations only.
+      const allMetadata = await listAllMediaMetadata();
+      ownedMedia = allMetadata.filter((item) => item && item.ownerId === uid);
+      console.warn('Falling back to metadata scan for user media deletion:', message);
+    } else {
+      throw new Error(
+        `Failed to query media metadata by owner. Ensure AWS_MEDIA_OWNER_INDEX is correct, the index exists, and IAM allows dynamodb:Query on table indexes. Root cause: ${message}`
+      );
+    }
+  }
 
   if (ownedMedia.length === 0) {
     return { deleted: 0, failed: 0 };
