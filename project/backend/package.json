@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "migrate:media-schema": "node scripts/migrate-media-schema.js",
-    "cleanup:orphan-media": "node scripts/cleanup-orphan-media.js"
+    "cleanup:orphan-media": "node scripts/cleanup-orphan-media.js",
+    "verify:users": "node scripts/verify-users.js"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.879.0",
@@ -22,6 +23,7 @@
     "firebase-admin": "^13.5.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
+    "nodemailer": "^8.0.5",
     "openai": "^4.20.1"
   },
   "devDependencies": {

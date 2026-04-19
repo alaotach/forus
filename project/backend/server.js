@@ -2,12 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const admin = require('firebase-admin');
 const mediaRoutes = require('./routes/mediaRoutes');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
+const PUBLIC_DIR = path.join(__dirname, 'public');
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const isProduction = NODE_ENV === 'production';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
@@ -17,6 +22,285 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
 const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || `${15 * 60 * 1000}`, 10);
 const RATE_LIMIT_MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '120', 10);
 const AI_RATE_LIMIT_MAX = parseInt(process.env.AI_RATE_LIMIT_MAX || '40', 10);
+const SMTP_PROVIDER = String(process.env.SMTP_PROVIDER || 'google').trim().toLowerCase();
+const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY || '';
+const DELETION_CODE_TTL_MS = parseInt(process.env.DELETION_CODE_TTL_MS || `${10 * 60 * 1000}`, 10);
+const DELETION_SESSION_TTL_MS = parseInt(process.env.DELETION_SESSION_TTL_MS || `${30 * 60 * 1000}`, 10);
+const DELETION_MAX_ATTEMPTS = parseInt(process.env.DELETION_MAX_ATTEMPTS || '5', 10);
+const DELETION_CODE_SECRET = process.env.DELETION_CODE_SECRET || crypto.randomBytes(32).toString('hex');
+const ACCOUNT_DELETION_FROM_EMAIL = process.env.ACCOUNT_DELETION_FROM_EMAIL || process.env.SMTP_FROM || process.env.SMTP_USER || '';
+
+const deletionSessions = new Map();
+let smtpTransporter = null;
+
+function resolveFirebaseProjectId() {
+  const envCandidates = [
+    process.env.FIREBASE_PROJECT_ID,
+    process.env.GOOGLE_CLOUD_PROJECT,
+    process.env.GCLOUD_PROJECT,
+    process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+  ].filter(Boolean);
+
+  if (envCandidates.length > 0) {
+    return String(envCandidates[0]).trim();
+  }
+
+  return undefined;
+}
+
+function getFirebaseAdminApp() {
+  if (admin.apps.length > 0) {
+    return admin.app();
+  }
+
+  const projectId = resolveFirebaseProjectId();
+  const initOptions = {
+    credential: admin.credential.applicationDefault(),
+  };
+
+  if (projectId) {
+    initOptions.projectId = projectId;
+  }
+
+  return admin.initializeApp(initOptions);
+}
+
+function getSmtpTransporter() {
+  if (smtpTransporter) {
+    return smtpTransporter;
+  }
+
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT || (SMTP_PROVIDER === 'google' || SMTP_PROVIDER === 'gmail' ? '465' : '587'), 10);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  if (!user || !pass || !ACCOUNT_DELETION_FROM_EMAIL) {
+    return null;
+  }
+
+  if ((SMTP_PROVIDER === 'google' || SMTP_PROVIDER === 'gmail') && !host) {
+    smtpTransporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user, pass },
+    });
+    return smtpTransporter;
+  }
+
+  smtpTransporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+
+  return smtpTransporter;
+}
+
+function createOtpCode() {
+  return String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+}
+
+function hashOtpCode(sessionId, code) {
+  return crypto
+    .createHash('sha256')
+    .update(`${sessionId}:${code}:${DELETION_CODE_SECRET}`)
+    .digest('hex');
+}
+
+function maskEmail(email) {
+  const [localPart, domainPart] = String(email || '').split('@');
+  if (!localPart || !domainPart) {
+    return 'your email';
+  }
+
+  const maskedLocal = `${localPart[0]}${'*'.repeat(Math.max(localPart.length - 2, 1))}${localPart[localPart.length - 1] || ''}`;
+  const domainTokens = domainPart.split('.');
+  const domainName = domainTokens[0] || '';
+  const domainTld = domainTokens.slice(1).join('.') || '***';
+  const maskedDomain = `${domainName[0] || '*'}***.${domainTld}`;
+
+  return `${maskedLocal}@${maskedDomain}`;
+}
+
+function cleanupExpiredDeletionSessions() {
+  const now = Date.now();
+
+  for (const [sessionId, session] of deletionSessions.entries()) {
+    if (session.sessionExpiresAt <= now || session.codeExpiresAt <= now) {
+      deletionSessions.delete(sessionId);
+    }
+  }
+}
+
+async function sendDeletionOtpEmail(email, code) {
+  const transporter = getSmtpTransporter();
+
+  if (!transporter) {
+    throw new Error('Deletion email service is not configured on the server.');
+  }
+
+  await transporter.sendMail({
+    from: ACCOUNT_DELETION_FROM_EMAIL,
+    to: email,
+    subject: 'For Us account deletion verification code',
+    text: [
+      'You requested account deletion for your For Us account.',
+      '',
+      `Your verification code is: ${code}`,
+      '',
+      `This code expires in ${Math.round(DELETION_CODE_TTL_MS / 60000)} minutes.`,
+      'If you did not request this, please ignore this email.',
+    ].join('\n'),
+  });
+}
+
+async function verifyFirebasePassword(email, password) {
+  if (!FIREBASE_WEB_API_KEY) {
+    throw new Error('FIREBASE_WEB_API_KEY is not configured on the server.');
+  }
+
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email,
+        password,
+        returnSecureToken: true,
+      }),
+    }
+  );
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return null;
+  }
+
+  return payload;
+}
+
+async function deleteDocsByQuery(db, queryRef) {
+  const snapshot = await queryRef.get();
+  if (snapshot.empty) {
+    return 0;
+  }
+
+  const docs = snapshot.docs;
+  const chunkSize = 200;
+  let deleted = 0;
+
+  for (let i = 0; i < docs.length; i += chunkSize) {
+    const batch = db.batch();
+    const chunk = docs.slice(i, i + chunkSize);
+    for (const docSnap of chunk) {
+      batch.delete(docSnap.ref);
+    }
+    await batch.commit();
+    deleted += chunk.length;
+  }
+
+  return deleted;
+}
+
+async function deleteDocumentRecursively(docRef) {
+  const childCollections = await docRef.listCollections();
+  for (const childCollection of childCollections) {
+    const childSnapshot = await childCollection.get();
+    for (const childDoc of childSnapshot.docs) {
+      await deleteDocumentRecursively(childDoc.ref);
+    }
+  }
+
+  await docRef.delete();
+}
+
+async function deleteUserAccountAndData(uid) {
+  const firebaseAdminApp = getFirebaseAdminApp();
+  const db = firebaseAdminApp.firestore();
+  const auth = firebaseAdminApp.auth();
+
+  const userDocRef = db.collection('users').doc(uid);
+  const userDoc = await userDocRef.get();
+  const profile = userDoc.exists ? userDoc.data() : {};
+  const coupleCode = typeof profile?.coupleCode === 'string' ? profile.coupleCode : '';
+  const nickname = typeof profile?.nickname === 'string' ? profile.nickname : '';
+  const partnerUid = typeof profile?.partnerUid === 'string' ? profile.partnerUid : '';
+
+  if (coupleCode) {
+    const coupleRegistryRef = db.collection('coupleRegistry').doc(coupleCode);
+    const coupleRegistryDoc = await coupleRegistryRef.get();
+    if (coupleRegistryDoc.exists) {
+      const data = coupleRegistryDoc.data() || {};
+      if (data.createdByUid === uid || data.partnerUid === uid) {
+        await coupleRegistryRef.delete();
+      }
+    }
+
+    const coupleDocRef = db.collection('couples').doc(coupleCode);
+    const coupleUpdates = {
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (nickname) {
+      coupleUpdates[`users.${nickname}`] = admin.firestore.FieldValue.delete();
+    }
+
+    if (Object.keys(coupleUpdates).length > 0) {
+      await coupleDocRef.set(coupleUpdates, { merge: true });
+    }
+
+    // Remove user-authored/shared records that include coupleCode+nickname markers.
+    if (nickname) {
+      await Promise.allSettled([
+        deleteDocsByQuery(
+          db,
+          db.collection('vault').doc(coupleCode).collection('items').where('author', '==', nickname)
+        ),
+        deleteDocsByQuery(
+          db,
+          db.collection('couples').doc(coupleCode).collection('chat').where('sender', '==', nickname)
+        ),
+        deleteDocsByQuery(
+          db,
+          db.collection('couples').doc(coupleCode).collection('echoChats').where('ownerNickname', '==', nickname)
+        ),
+        deleteDocsByQuery(
+          db,
+          db.collection('conflicts').doc(coupleCode).collection('entries').where('nickname', '==', nickname)
+        ),
+        deleteDocsByQuery(
+          db,
+          db.collection('dailyParagraphs').where('coupleCode', '==', coupleCode).where('nickname', '==', nickname)
+        ),
+        deleteDocsByQuery(
+          db,
+          db.collection('sharedDiary').where('coupleCode', '==', coupleCode).where('author', '==', nickname)
+        ),
+      ]);
+    }
+  }
+
+  if (partnerUid) {
+    const partnerRef = db.collection('users').doc(partnerUid);
+    await partnerRef.set(
+      {
+        partnerUid: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  }
+
+  if (userDoc.exists) {
+    await deleteDocumentRecursively(userDocRef);
+  }
+
+  await auth.deleteUser(uid);
+}
+
+setInterval(cleanupExpiredDeletionSessions, 60 * 1000).unref();
 
 if (isProduction) {
   const requiredEnvVars = [
@@ -51,6 +335,114 @@ app.use(cors({
   },
 }));
 app.use(express.json());
+
+// Public policy and deletion pages (for Google Play and user access requests).
+app.get('/delete-data', (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'delete-data.html'));
+});
+
+app.get('/account-deletion', (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'account-deletion.html'));
+});
+
+app.post('/api/account-deletion/start', async (req, res) => {
+  try {
+    cleanupExpiredDeletionSessions();
+
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const password = String(req.body?.password || '');
+
+    if (!email || !password) {
+      return res.status(400).json({ success: false, error: 'Email and password are required.' });
+    }
+
+    const firebaseSignIn = await verifyFirebasePassword(email, password);
+    if (!firebaseSignIn || !firebaseSignIn.localId) {
+      return res.status(401).json({ success: false, error: 'Could not verify account credentials.' });
+    }
+
+    const userRecord = await getFirebaseAdminApp().auth().getUser(firebaseSignIn.localId);
+    if (!userRecord.email || userRecord.email.toLowerCase() !== email) {
+      return res.status(401).json({ success: false, error: 'Could not verify account credentials.' });
+    }
+
+    if (userRecord.disabled) {
+      return res.status(403).json({ success: false, error: 'This account is disabled. Contact support.' });
+    }
+
+    const sessionId = crypto.randomUUID();
+    const code = createOtpCode();
+    const now = Date.now();
+
+    deletionSessions.set(sessionId, {
+      uid: userRecord.uid,
+      email,
+      codeHash: hashOtpCode(sessionId, code),
+      attempts: 0,
+      codeExpiresAt: now + DELETION_CODE_TTL_MS,
+      sessionExpiresAt: now + DELETION_SESSION_TTL_MS,
+    });
+
+    await sendDeletionOtpEmail(email, code);
+
+    return res.json({
+      success: true,
+      sessionId,
+      codeExpiresInSeconds: Math.floor(DELETION_CODE_TTL_MS / 1000),
+      destination: maskEmail(email),
+    });
+  } catch (error) {
+    console.error('Failed to start account deletion flow:', error);
+    return res.status(500).json({ success: false, error: 'Unable to start account deletion right now.' });
+  }
+});
+
+app.post('/api/account-deletion/confirm', async (req, res) => {
+  try {
+    cleanupExpiredDeletionSessions();
+
+    const sessionId = String(req.body?.sessionId || '').trim();
+    const code = String(req.body?.code || '').trim();
+
+    if (!sessionId || !code) {
+      return res.status(400).json({ success: false, error: 'Session id and verification code are required.' });
+    }
+
+    const session = deletionSessions.get(sessionId);
+    if (!session) {
+      return res.status(400).json({ success: false, error: 'Verification session expired. Start again.' });
+    }
+
+    const now = Date.now();
+    if (session.codeExpiresAt <= now || session.sessionExpiresAt <= now) {
+      deletionSessions.delete(sessionId);
+      return res.status(400).json({ success: false, error: 'Verification session expired. Start again.' });
+    }
+
+    if (session.attempts >= DELETION_MAX_ATTEMPTS) {
+      deletionSessions.delete(sessionId);
+      return res.status(429).json({ success: false, error: 'Too many invalid code attempts. Start again.' });
+    }
+
+    const providedHash = hashOtpCode(sessionId, code);
+    if (providedHash !== session.codeHash) {
+      session.attempts += 1;
+      deletionSessions.set(sessionId, session);
+      return res.status(401).json({ success: false, error: 'Invalid verification code.' });
+    }
+
+    await deleteUserAccountAndData(session.uid);
+    deletionSessions.delete(sessionId);
+
+    return res.json({
+      success: true,
+      message: 'Your account and associated data have been deleted successfully.',
+    });
+  } catch (error) {
+    console.error('Failed to confirm account deletion:', error);
+    return res.status(500).json({ success: false, error: 'Unable to delete account right now.' });
+  }
+});
 
 // Request log line for each inbound HTTP call (visible in systemd journal)
 app.use((req, res, next) => {

@@ -110,7 +110,7 @@ export default function ConflictScreen() {
         'Saved 💕',
         'Your feelings have been saved. Would you like to send this as a message to your partner?',
         [
-          { text: 'Just Save', onPress: () => router.back() },
+          { text: 'Just Save', onPress: () => (router.canGoBack() ? router.back() : router.replace('/')) },
           { text: 'Send Message', onPress: sendAsMessage }
         ]
       );
@@ -138,7 +138,7 @@ export default function ConflictScreen() {
       });
 
       Alert.alert('Sent! 💕', 'Your message has been sent to your partner', [
-        { text: 'OK', onPress: () => router.back() }
+        { text: 'OK', onPress: () => (router.canGoBack() ? router.back() : router.replace('/')) }
       ]);
     } catch (error) {
       console.error('Error sending message:', error);
@@ -150,7 +150,11 @@ export default function ConflictScreen() {
     if (currentStep > 0) {
       setCurrentStep(currentStep - 1);
     } else {
-      router.back();
+      if (router.canGoBack()) {
+        router.back();
+      } else {
+        router.replace('/');
+      }
     }
   };
 

@@ -1,0 +1,42 @@
+# Keep EAS upload archive small and focused on mobile app sources.
+
+# Dependencies / caches
+node_modules/
+.expo/
+
+# Build outputs
+build/
+dist/
+web-build/
+
+# Local Android artifacts (keep source android files, exclude generated outputs)
+android/.gradle/
+android/**/.gradle/
+android/build/
+android/**/build/
+android/.cxx/
+android/**/.cxx/
+android/.kotlin/
+android/**/*.iml
+android/**/captures/
+android/captures/
+android/local.properties
+
+# Local iOS artifacts (safe even if iOS folder is not present)
+ios/build/
+ios/Pods/
+
+# Backend workspace is not needed for app binary compilation
+backend/
+
+# Logs and temporary files
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.tmp
+*.temp
+
+# Local/editor noise
+.DS_Store
+.vscode/

@@ -617,7 +617,10 @@ export default function SharedDiaryScreen() {
         {!selectedDate ? (
           <>
             <Animated.View style={[styles.header, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
-              <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+              <TouchableOpacity
+                style={styles.backButton}
+                onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+              >
                 <ArrowLeft size={24} color="#ffffff" />
               </TouchableOpacity>
               <Text style={styles.headerTitle}>Shared Diary 💕</Text>

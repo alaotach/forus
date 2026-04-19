@@ -106,7 +106,7 @@ export default function SubscriptionsScreen() {
         Alert.alert(
           'Success! 🎉',
           `You have been upgraded to ${planName} plan! Both you and your partner can now enjoy all premium features together.`,
-          [{ text: 'Done', onPress: () => router.back() }]
+          [{ text: 'Done', onPress: () => (router.canGoBack() ? router.back() : router.replace('/')) }]
         );
       } else {
         Alert.alert('Purchase Cancelled', 'The purchase was cancelled.');
@@ -233,7 +233,10 @@ export default function SubscriptionsScreen() {
     <LinearGradient colors={['#f5f7fa', '#e8eef5']} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+            style={styles.backButton}
+          >
             <ArrowLeft size={24} color="#333" />
           </TouchableOpacity>
           <Text style={styles.title}>Upgrade Your Plan</Text>

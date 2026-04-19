@@ -27,7 +27,7 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
   const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
   
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const recordingTimer = useRef<NodeJS.Timeout | null>(null);
+  const recordingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Modern Expo Audio recorder setup
   const recorder = useAudioRecorder({
@@ -36,13 +36,12 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
       outputFormat: 'mpeg4',
       audioEncoder: 'aac',
       sampleRate: 44100,
-      numberOfChannels: 2,
       bitRate: 128000,
     },
     ios: {
       extension: '.m4a',
       outputFormat: 'mpeg4aac',
-      audioQuality: 'max',
+      audioQuality: 127,
       sampleRate: 44100,
       numberOfChannels: 2,
       bitRate: 128000,
@@ -54,7 +53,7 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
       mimeType: 'audio/webm',
       bitsPerSecond: 128000,
     },
-  });
+  } as any);
 
   useEffect(() => {
     requestAudioPermission();
@@ -120,8 +119,8 @@ export default function VoiceRecorder({ onRecordingComplete, onCancel, isVisible
       }
 
       await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
       setAudioPermission(true);
       return true;

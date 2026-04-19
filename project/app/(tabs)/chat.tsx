@@ -146,7 +146,7 @@ export default function ChatScreen() {
   const flatListRef = useRef<FlatList>(null);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const mounted = useRef(true);
-  const recordingTimer = useRef<NodeJS.Timeout | null>(null);
+  const recordingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [audioPermission, setAudioPermission] = useState<boolean>(false);
   const QUICK_REACTIONS = ['❤️', '😍', '😂', '😮', '😢', '🙏'];
@@ -251,8 +251,8 @@ export default function ChatScreen() {
       }
 
       await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
       setAudioPermission(true);
       return true;
@@ -388,7 +388,7 @@ export default function ChatScreen() {
 
           if (message.replyTo?.media?.mediaId) {
             try {
-              let replyMediaUrl: string;
+              let replyMediaUrl: string | undefined;
 
               if (message.replyTo.media.fileKey) {
                 const cachedReplyPath = await getCachedFile(message.replyTo.media.fileKey);
@@ -1016,7 +1016,7 @@ export default function ChatScreen() {
     setPendingMessages((prev) => prev.filter((m) => m._tempId !== failedMessage._tempId));
     await sendMessage(
       failedMessage.message,
-      failedMessage.mediaUrl,
+      failedMessage.mediaUrl ?? undefined,
       failedMessage.type as 'image' | 'audio' | undefined,
       null,
       failedMessage.media || undefined
@@ -2046,7 +2046,6 @@ const AudioMessageBubble = ({ item, isMyMessage }: { item: ChatMessage, isMyMess
               showSectionTitles={false}
               showHistory
               columns={6}
-              emojiSize={26}
               onEmojiSelected={(emoji: string) => {
                 if (selectedMessage) {
                   addReaction(selectedMessage.id, emoji);

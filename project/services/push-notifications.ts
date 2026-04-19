@@ -558,7 +558,7 @@ function setupNotificationListeners(): void {
     } else if (data?.type === 'memory') {
       router.push('/(tabs)/vault');
     } else if (data?.type === 'streak' || data?.type === 'milestone') {
-      router.push('/(tabs)/index');
+      router.push('/');
     }
   });
 }

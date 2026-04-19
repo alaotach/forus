@@ -281,7 +281,10 @@ export default function DeepTalkScreen() {
             },
           ]}
         >
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+            style={styles.backButton}
+          >
             <ArrowLeft size={24} color="#ffffff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Deep Questions 💭</Text>

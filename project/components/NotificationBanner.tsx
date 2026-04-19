@@ -75,7 +75,7 @@ export default function NotificationBanner({
     });
   };
 
-  const getGradientColors = () => {
+  const getGradientColors = (): [string, string] => {
     switch (type) {
       case 'message':
         return ['#ff6b9d', '#c44569'];

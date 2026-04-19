@@ -1152,7 +1152,10 @@ export default function LiveWidgetScreen() {
       <SafeAreaView style={styles.safeArea}>
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+          >
             <ArrowLeft size={20} color="#ffffff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Shared Live Widget</Text>

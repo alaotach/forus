@@ -131,6 +131,18 @@ npm start
 - Headers: `Authorization: Bearer <media_token>`
 - Returns in-memory counters + recent failure events (for operational debugging)
 
+### Start Automated Account Deletion (Email + Password + OTP)
+- **POST** `/api/account-deletion/start`
+- Body: `{ email: string, password: string }`
+- Verifies account credentials against Firebase Auth, then emails a 6-digit deletion code.
+- Returns: `{ success: true, sessionId: string, codeExpiresInSeconds: number, destination: string }`
+
+### Confirm Automated Account Deletion
+- **POST** `/api/account-deletion/confirm`
+- Body: `{ sessionId: string, code: string }`
+- Verifies OTP code and permanently deletes the Firebase Auth account plus linked user data.
+- Returns: `{ success: true, message: string }`
+
 ## AWS Media Setup
 
 1. Create a private S3 bucket and block public access.
@@ -221,6 +233,29 @@ heroku create forus-backend
 heroku config:set HACKCLUB_API_KEY=your_key_here
 git subtree push --prefix backend heroku main
 ```
+
+## Account Deletion Setup
+
+Set these additional variables in `backend/.env` for the automated deletion flow:
+
+```env
+FIREBASE_WEB_API_KEY=your_firebase_web_api_key
+SMTP_PROVIDER=google
+ACCOUNT_DELETION_FROM_EMAIL=yourgmail@gmail.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=yourgmail@gmail.com
+SMTP_PASS=your_16_char_google_app_password
+DELETION_CODE_TTL_MS=600000
+DELETION_SESSION_TTL_MS=1800000
+DELETION_MAX_ATTEMPTS=5
+DELETION_CODE_SECRET=replace_with_long_random_secret
+```
+
+Google SMTP notes:
+- Use a Gmail account with 2-Step Verification enabled.
+- Generate an App Password in your Google Account security settings.
+- Put that App Password in `SMTP_PASS` (not your normal Gmail login password).
 
 ## Frontend Configuration
 

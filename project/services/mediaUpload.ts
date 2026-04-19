@@ -48,12 +48,13 @@ async function getLocalFileSize(uri: string): Promise<number> {
     return blob.size;
   }
 
-  const info = await FileSystem.getInfoAsync(uri, { size: true });
-  if (!info.exists || typeof info.size !== 'number') {
+  const info = await FileSystem.getInfoAsync(uri);
+  const fileSize = (info as any).size;
+  if (!info.exists || typeof fileSize !== 'number') {
     throw new Error('Unable to read file size for upload');
   }
 
-  return info.size;
+  return fileSize;
 }
 
 export const uploadMediaFile = async (

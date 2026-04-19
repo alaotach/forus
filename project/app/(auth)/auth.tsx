@@ -40,15 +40,22 @@ export default function AuthScreen() {
       }
 
       if (result.success) {
+        if (result.requiresEmailVerification) {
+          // @ts-ignore
+          router.replace('/(auth)/verify-email');
+          return;
+        }
+
         if (!isLogin) {
-          // New user - go to couple options to choose create or join
           // @ts-ignore
-          router.replace('/(auth)/couple-options');
+          router.replace('/(auth)/verify-email');
         } else {
-          // Existing user - go to couple check
-          // @ts-ignore
           router.replace('/(auth)/couple-check');
         }
+      } else if (result.requiresEmailVerification) {
+        Alert.alert('Verify your email', result.error || 'Please verify your email before continuing.');
+        // @ts-ignore
+        router.replace('/(auth)/verify-email');
       } else {
         Alert.alert('Error', result.error || 'Authentication failed');
       }

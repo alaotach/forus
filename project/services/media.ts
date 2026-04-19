@@ -206,7 +206,7 @@ async function enforceCachePolicy(cacheMap: CacheMap): Promise<CacheMap> {
       continue;
     }
 
-    const info = await FileSystem.getInfoAsync(entry.localPath, { size: true });
+    const info = await FileSystem.getInfoAsync(entry.localPath);
     if (!info.exists) {
       continue;
     }
@@ -215,7 +215,7 @@ async function enforceCachePolicy(cacheMap: CacheMap): Promise<CacheMap> {
       fileKey,
       localPath: entry.localPath,
       updatedAt: entry.updatedAt,
-      size: typeof info.size === 'number' ? info.size : 0,
+      size: typeof (info as any).size === 'number' ? (info as any).size : 0,
     });
   }
 

@@ -5,13 +5,14 @@ import { useFrameworkReady } from '@/hooks/useFrameworkReady';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
 import { PlayfairDisplay_400Regular, PlayfairDisplay_700Bold } from '@expo-google-fonts/playfair-display';
 import * as SplashScreen from 'expo-splash-screen';
-import { onAuthStateChange, isCoupleConnected } from '@/services/auth';
+import { onAuthStateChange, isCoupleConnected, refreshCurrentUser } from '@/services/auth';
 import { User } from 'firebase/auth';
 import { ActivityIndicator, Platform, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '@/services/firebase';
 import { requestForusWidgetUpdate, syncWidgetCacheFromFirestore } from '@/services/androidWidget';
+import { AnimatedSplashScreen } from '@/components/AnimatedSplashScreen';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -21,8 +22,10 @@ export default function RootLayout() {
   const router = useRouter();
   
   const [user, setUser] = useState<User | null>(null);
+  const [emailVerified, setEmailVerified] = useState(false);
   const [coupleConnected, setCoupleConnected] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  const [showAnimatedSplash, setShowAnimatedSplash] = useState(true);
   const [widgetSyncIdentity, setWidgetSyncIdentity] = useState<{ coupleCode: string; nickname: string } | null>(null);
 
   const [fontsLoaded, fontError] = useFonts({
@@ -46,12 +49,28 @@ export default function RootLayout() {
 
       if (authUser) {
         try {
+          const reloadedUser = await refreshCurrentUser();
+          setEmailVerified(Boolean(reloadedUser?.emailVerified));
+        } catch (error) {
+          console.error('Error refreshing user verification state:', error);
+          setEmailVerified(Boolean(authUser.emailVerified));
+        }
+
+        if (!authUser.emailVerified) {
+          setCoupleConnected(false);
+          setAuthLoading(false);
+          return;
+        }
+
+        try {
           const connected = await isCoupleConnected(authUser.uid);
           setCoupleConnected(connected);
         } catch (error) {
           console.error('Error checking couple connection:', error);
           setCoupleConnected(false);
         }
+      } else {
+        setEmailVerified(false);
       }
 
       setAuthLoading(false);
@@ -122,10 +141,17 @@ export default function RootLayout() {
     if (authLoading) return;
 
     const inAuthGroup = segments[0] === '(auth)';
+    const currentAuthScreen = String(segments[1] || '');
+    const inVerifyEmailScreen = inAuthGroup && currentAuthScreen === 'verify-email';
     
     if (!user) {
       if (!inAuthGroup) {
         router.replace('/(auth)/auth');
+      }
+    } else if (!emailVerified) {
+      if (!inVerifyEmailScreen) {
+        // @ts-ignore
+        router.replace('/(auth)/verify-email');
       }
     } else if (!coupleConnected) {
       // Allow them to navigate through the connection flow, but don't allow them in tabs yet.
@@ -138,7 +164,7 @@ export default function RootLayout() {
         router.replace('/(tabs)');
       }
     }
-  }, [user, coupleConnected, authLoading, segments]);
+  }, [user, emailVerified, coupleConnected, authLoading, segments]);
 
   if (!fontsLoaded && !fontError) {
     return null;
@@ -147,7 +173,8 @@ export default function RootLayout() {
   if (authLoading) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff' }}>
-        <ActivityIndicator size="large" color="#FF6B6B" />
+        {!showAnimatedSplash ? <ActivityIndicator size="large" color="#FF6B6B" /> : null}
+        {showAnimatedSplash ? <AnimatedSplashScreen onDone={() => setShowAnimatedSplash(false)} /> : null}
       </View>
     );
   }
@@ -155,8 +182,8 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="(auth)" options={{ animationEnabled: false }} />
-        <Stack.Screen name="(tabs)" options={{ animationEnabled: false }} />
+        <Stack.Screen name="(auth)" options={{ animation: 'none' }} />
+        <Stack.Screen name="(tabs)" options={{ animation: 'none' }} />
         <Stack.Screen name="paragraph" />
         <Stack.Screen name="shared-diary" />
         <Stack.Screen name="echo" />
@@ -171,6 +198,7 @@ export default function RootLayout() {
         <Stack.Screen name="+not-found" />
       </Stack>
       <StatusBar style="auto" />
+      {showAnimatedSplash ? <AnimatedSplashScreen onDone={() => setShowAnimatedSplash(false)} /> : null}
     </GestureHandlerRootView>
   );
 }

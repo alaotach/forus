@@ -107,7 +107,7 @@ export default function VaultScreen() {
   const [unavailableItemById, setUnavailableItemById] = useState<Record<string, boolean>>({});
   const uploadedLocalMediaPathByFileKeyRef = useRef<Record<string, string>>({});
   const uploadedLocalMediaPathByMediaIdRef = useRef<Record<string, string>>({});
-  const recordingTimer = useRef<NodeJS.Timeout | null>(null);
+  const recordingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const isUploadingMedia = uploadingMediaKind !== null;
 
   const recordingOptions = {
@@ -141,8 +141,8 @@ export default function VaultScreen() {
   const requestAudioPermission = async () => {
     try {
       await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
     } catch (error) {
       console.error('Error setting audio mode:', error);
@@ -481,8 +481,8 @@ export default function VaultScreen() {
 
       // Make sure audio mode is set
       await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
 
       console.log('Starting recording...');
@@ -1505,11 +1505,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     paddingTop: 16,
-  addButtonDisabled: {
-    opacity: 0.45,
-  },
     borderTopWidth: 1,
     borderTopColor: '#f1f3f4',
+  },
+  addButtonDisabled: {
+    opacity: 0.45,
   },
   addButton: {
     flex: 1,

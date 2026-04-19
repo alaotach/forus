@@ -9,6 +9,7 @@ export default function AuthLayout() {
       }}
     >
       <Stack.Screen name="auth" />
+      <Stack.Screen name="verify-email" />
       <Stack.Screen name="couple-check" />
       <Stack.Screen name="couple-code" />
       <Stack.Screen name="couple-options" />

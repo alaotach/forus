@@ -1,4 +1,4 @@
-const DEFAULT_BACKEND_URL = 'http://13.60.188.184:3000';
+const DEFAULT_BACKEND_URL = 'https://forus.eryzalabs.com';
 const REQUEST_TIMEOUT_MS = 12000;
 let hasLoggedBackendUrl = false;
 

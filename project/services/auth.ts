@@ -6,11 +6,13 @@
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  sendEmailVerification,
   signOut,
   updateCurrentUser,
   onAuthStateChanged,
   User,
   AuthError,
+  reload,
 } from 'firebase/auth';
 import { auth, db } from '@/services/firebase';
 import { doc, setDoc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -25,25 +27,40 @@ export interface UserAuthData {
   updatedAt: any;
 }
 
+export interface AuthActionResult {
+  success: boolean;
+  error?: string;
+  requiresEmailVerification?: boolean;
+}
+
+async function ensureUserProfileDocument(user: User): Promise<void> {
+  const userRef = doc(db, 'users', user.uid);
+  const userDoc = await getDoc(userRef);
+
+  if (!userDoc.exists()) {
+    await setDoc(userRef, {
+      uid: user.uid,
+      email: user.email,
+      nickname: '',
+      coupleCode: '',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+}
+
 /**
  * Register new user with email and password
  */
-export async function registerUser(email: string, password: string): Promise<{ success: boolean; error?: string }> {
+export async function registerUser(email: string, password: string): Promise<AuthActionResult> {
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
 
-    // Create user profile in Firestore (without nickname/couple code yet)
-    await setDoc(doc(db, 'users', user.uid), {
-      uid: user.uid,
-      email: user.email,
-      nickname: '', // To be filled in next step
-      coupleCode: '', // To be filled when generating code
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    // Require verification before allowing account setup flow.
+    await sendEmailVerification(user);
 
-    return { success: true };
+    return { success: true, requiresEmailVerification: true };
   } catch (error: any) {
     console.error('Registration error:', error);
     return { success: false, error: getAuthErrorMessage(error) };
@@ -53,14 +70,47 @@ export async function registerUser(email: string, password: string): Promise<{ s
 /**
  * Login user with email and password
  */
-export async function loginUser(email: string, password: string): Promise<{ success: boolean; error?: string }> {
+export async function loginUser(email: string, password: string): Promise<AuthActionResult> {
   try {
-    await signInWithEmailAndPassword(auth, email, password);
+    const userCredential = await signInWithEmailAndPassword(auth, email, password);
+    const user = userCredential.user;
+    await reload(user);
+
+    if (!user.emailVerified) {
+      return {
+        success: false,
+        requiresEmailVerification: true,
+        error: 'Please verify your email before continuing.',
+      };
+    }
+
+    await ensureUserProfileDocument(user);
     return { success: true };
   } catch (error: any) {
     console.error('Login error:', error);
     return { success: false, error: getAuthErrorMessage(error) };
   }
+}
+
+export async function resendVerificationEmailToCurrentUser(): Promise<AuthActionResult> {
+  try {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      return { success: false, error: 'No logged-in user found.' };
+    }
+
+    await sendEmailVerification(currentUser);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: getAuthErrorMessage(error) };
+  }
+}
+
+export async function refreshCurrentUser(): Promise<User | null> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) return null;
+  await reload(currentUser);
+  return currentUser;
 }
 
 /**

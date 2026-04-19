@@ -281,7 +281,10 @@ export default function MilestonesScreen() {
     <LinearGradient colors={['#667eea', '#764ba2']} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+            style={styles.backButton}
+          >
             <ArrowLeft size={24} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.title}>Milestones & Anniversaries</Text>

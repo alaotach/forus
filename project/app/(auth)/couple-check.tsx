@@ -30,6 +30,12 @@ export default function CoupleCheckScreen() {
       return;
     }
 
+    if (!user.emailVerified) {
+      // @ts-ignore
+      router.replace('/(auth)/verify-email');
+      return;
+    }
+
     try {
       const profile = await getUserProfile(user.uid);
       const isConnected = await isCoupleConnected(user.uid);

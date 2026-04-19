@@ -41,7 +41,7 @@ export default function WriteScreen() {
     }
 
     const unsubRecent = loadRecentParagraphs();
-    const unsubToday = checkTodaysParagraph();
+    const unsubTodayPromise = checkTodaysParagraph();
 
     // Animate in
     Animated.parallel([
@@ -59,12 +59,10 @@ export default function WriteScreen() {
 
     return () => {
       if (unsubRecent) unsubRecent();
-      if (unsubToday && typeof unsubToday.then === 'function') {
-        unsubToday.then((unsub: (() => void) | undefined) => {
+      if (unsubTodayPromise && typeof unsubTodayPromise.then === 'function') {
+        unsubTodayPromise.then((unsub: (() => void) | undefined) => {
           if (unsub) unsub();
         });
-      } else if (typeof unsubToday === 'function') {
-        unsubToday();
       }
     };
   }, [isConnected, isLoading]);
@@ -119,7 +117,6 @@ export default function WriteScreen() {
         try {
           const prompt = await getTodaysPrompt({
             nickname: coupleData.nickname,
-            partnerNickname: coupleData.partnerNickname,
             coupleCode: coupleData.coupleCode
           });
           const cleaned = prompt?.trim() || '';

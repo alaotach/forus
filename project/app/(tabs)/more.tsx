@@ -8,6 +8,7 @@ import {
   Alert,
   Animated,
   Modal,
+  Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -19,6 +20,16 @@ import { db } from '@/services/firebase';
 import { logoutUser } from '@/services/auth';
 import { AdBanner } from '@/components/AdBanner';
 import { getSubscription, shouldShowAds, SubscriptionData } from '@/services/subscriptions';
+
+type FeatureCard = {
+  id: string;
+  title: string;
+  subtitle: string;
+  icon: any;
+  emoji: string;
+  colors: [string, string];
+  route?: string;
+};
 
 export default function MoreScreen() {
   const { coupleData, isConnected, clearCoupleData } = useCouple();
@@ -159,7 +170,7 @@ export default function MoreScreen() {
     return null;
   }
 
-  const features = [
+  const features: FeatureCard[] = [
     {
       id: 'goals',
       title: 'Shared Goals',

@@ -57,7 +57,7 @@ export default function TabLayout() {
   useEffect(() => {
     if (!coupleData) return;
 
-    let typesToMark: Array<'message' | 'paragraph' | 'memory' | 'streak' | 'milestone' | 'echo' | 'goal' | 'mood' | 'deep-question'> = [];
+    let typesToMark: Array<'message' | 'paragraph' | 'memory' | 'streak' | 'milestone' | 'echo' | 'goal' | 'mood' | 'deep-question' | 'shared-diary'> = [];
 
     if (pathname?.includes('/chat')) {
       typesToMark = ['message'];

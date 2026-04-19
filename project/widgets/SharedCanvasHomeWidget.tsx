@@ -90,7 +90,7 @@ export function SharedCanvasHomeWidget({
         style={{
           height: 'match_parent',
           width: 'match_parent',
-          backgroundColor: backgroundColor || '#000000',
+          backgroundColor: (backgroundColor || '#000000') as any,
         }}
       />
 

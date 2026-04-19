@@ -525,7 +525,10 @@ export default function EchoScreen() {
             },
           ]}
         >
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+            style={styles.backButton}
+          >
             <ArrowLeft size={24} color="#ffffff" />
           </TouchableOpacity>
           <View style={styles.headerInfo}>

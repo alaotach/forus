@@ -266,7 +266,7 @@ export default function ParagraphScreen() {
       setIsEditing(true);
 
       Alert.alert('Saved!', 'Your paragraph has been saved 💕', [
-        { text: 'OK', onPress: () => router.back() }
+        { text: 'OK', onPress: () => (router.canGoBack() ? router.back() : router.replace('/')) }
       ]);
     } catch (error) {
       console.error('Error saving paragraph:', error);
@@ -292,7 +292,10 @@ export default function ParagraphScreen() {
             },
           ]}
         >
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+            style={styles.backButton}
+          >
             <ArrowLeft size={24} color="#ffffff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>
