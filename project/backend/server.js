@@ -7,6 +7,8 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const admin = require('firebase-admin');
 const mediaRoutes = require('./routes/mediaRoutes');
+const { listAllMediaMetadata, deleteMediaMetadataById } = require('./services/mediaMetadataService');
+const { deleteMediaObject } = require('./services/s3Service');
 require('dotenv').config();
 
 const app = express();
@@ -216,6 +218,31 @@ async function deleteDocumentRecursively(docRef) {
   await docRef.delete();
 }
 
+async function deleteUserMediaAssets(uid) {
+  const allMetadata = await listAllMediaMetadata();
+  const ownedMedia = allMetadata.filter((item) => item && item.ownerId === uid);
+
+  if (ownedMedia.length === 0) {
+    return { deleted: 0, failed: 0 };
+  }
+
+  const results = await Promise.allSettled(
+    ownedMedia.map(async (media) => {
+      await deleteMediaObject(media.fileKey);
+      await deleteMediaMetadataById(media.id);
+    })
+  );
+
+  const failed = results.filter((result) => result.status === 'rejected').length;
+  const deleted = results.length - failed;
+
+  if (failed > 0) {
+    throw new Error(`Failed to delete ${failed} media item(s) for user ${uid}`);
+  }
+
+  return { deleted, failed };
+}
+
 async function deleteUserAccountAndData(uid) {
   const firebaseAdminApp = getFirebaseAdminApp();
   const db = firebaseAdminApp.firestore();
@@ -292,6 +319,8 @@ async function deleteUserAccountAndData(uid) {
       { merge: true }
     );
   }
+
+  await deleteUserMediaAssets(uid);
 
   if (userDoc.exists) {
     await deleteDocumentRecursively(userDocRef);
