@@ -603,8 +603,11 @@ app.post('/api/push/dispatch', async (req, res) => {
       recipientTokens = Array.from(new Set([...nativeTokens, ...uidTokens, ...nicknameTokens]));
 
       tokenDiagnostics = {
+        coupleCode,
+        coupleDocExists: coupleDoc.exists,
         senderUid,
         senderNickname: senderNickname || null,
+        userNicknames: Object.keys(usersByNickname),
         nativeTokenOwnerCount: Object.keys(nativePushTokensByUid).length,
         uidTokenOwnerCount: Object.keys(pushTokensByUid).length,
         nicknameTokenOwnerCount: Object.keys(pushTokensByNickname).length,
