@@ -662,9 +662,22 @@ app.post('/api/push/dispatch', async (req, res) => {
       return acc;
     }, {});
 
+    const expoTokenPattern = /^ExponentPushToken\[/;
+    const fcmTokens = recipientTokens
+      .map((token) => String(token || '').trim())
+      .filter(Boolean)
+      .filter((token) => !expoTokenPattern.test(token));
+
+    if (fcmTokens.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No recipient native FCM tokens available after filtering Expo tokens.',
+      });
+    }
+
     const messaging = getFirebaseAdminApp().messaging();
     const message = {
-      tokens: recipientTokens,
+      tokens: fcmTokens,
       data: {
         ...safeData,
         coupleCode,
@@ -679,7 +692,7 @@ app.post('/api/push/dispatch', async (req, res) => {
         : {}),
       android: {
         priority: 'high',
-        ...(ttlSeconds > 0 ? { ttl: `${ttlSeconds}s` } : {}),
+        ...(ttlSeconds > 0 ? { ttl: ttlSeconds * 1000 } : {}),
       },
     };
 
@@ -688,7 +701,7 @@ app.post('/api/push/dispatch', async (req, res) => {
     const errors = response.responses
       .map((entry, index) => ({
         index,
-        token: recipientTokens[index],
+        token: fcmTokens[index],
         success: entry.success,
         error: entry.error ? String(entry.error.message || entry.error) : null,
       }))
@@ -698,12 +711,16 @@ app.post('/api/push/dispatch', async (req, res) => {
       senderUid,
       coupleCode,
       requested: recipientTokens.length,
+      filteredFcmTokens: fcmTokens.length,
       successCount: response.successCount,
       failureCount: response.failureCount,
     });
 
     return res.json({
       success: true,
+      requestedCount: recipientTokens.length,
+      filteredFcmTokens: fcmTokens.length,
+      skippedExpoTokens: recipientTokens.length - fcmTokens.length,
       successCount: response.successCount,
       failureCount: response.failureCount,
       errors,
