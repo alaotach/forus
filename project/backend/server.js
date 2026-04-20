@@ -546,6 +546,7 @@ app.post('/api/push/dispatch', async (req, res) => {
   try {
     const decoded = await verifyFirebaseAuthHeader(req);
     const senderUid = String(decoded?.uid || '').trim();
+    const tokenProjectId = String(decoded?.aud || '').trim();
     if (!senderUid) {
       return res.status(401).json({ success: false, error: 'Invalid auth token.' });
     }
@@ -602,11 +603,16 @@ app.post('/api/push/dispatch', async (req, res) => {
 
       recipientTokens = Array.from(new Set([...nativeTokens, ...uidTokens, ...nicknameTokens]));
 
+      const adminProjectId = String(getFirebaseAdminApp().options?.projectId || '').trim();
       tokenDiagnostics = {
         coupleCode,
         coupleDocExists: coupleDoc.exists,
         senderUid,
         senderNickname: senderNickname || null,
+        tokenProjectId: tokenProjectId || null,
+        adminProjectId: adminProjectId || null,
+        projectMatch: Boolean(tokenProjectId && adminProjectId && tokenProjectId === adminProjectId),
+        coupleDocFieldKeys: Object.keys(coupleData),
         userNicknames: Object.keys(usersByNickname),
         nativeTokenOwnerCount: Object.keys(nativePushTokensByUid).length,
         uidTokenOwnerCount: Object.keys(pushTokensByUid).length,
