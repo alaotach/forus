@@ -80,8 +80,8 @@ export default function HomeScreen() {
     console.log('Home screen - isConnected:', isConnected, 'coupleData:', coupleData);
     
     if (!isConnected || !coupleData) {
-      console.log('Not connected, redirecting to auth');
-      router.replace('/(auth)/auth');
+      console.log('Not connected, redirecting to couple-check');
+      router.replace('/(auth)/couple-check');
       return;
     }
 

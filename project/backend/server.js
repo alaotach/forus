@@ -183,6 +183,21 @@ async function verifyFirebasePassword(email, password) {
   return payload;
 }
 
+async function verifyFirebaseAuthHeader(req) {
+  const authHeader = String(req.headers.authorization || '');
+  if (!authHeader.startsWith('Bearer ')) {
+    throw new Error('Missing bearer token.');
+  }
+
+  const idToken = authHeader.slice('Bearer '.length).trim();
+  if (!idToken) {
+    throw new Error('Missing bearer token.');
+  }
+
+  const decoded = await getFirebaseAdminApp().auth().verifyIdToken(idToken);
+  return decoded;
+}
+
 async function deleteDocsByQuery(db, queryRef) {
   const snapshot = await queryRef.get();
   if (snapshot.empty) {
@@ -522,6 +537,96 @@ const aiLimiter = rateLimit({
 
 app.use('/api', apiLimiter);
 app.use('/', apiLimiter, mediaRoutes);
+
+app.post('/api/push/dispatch', async (req, res) => {
+  try {
+    const decoded = await verifyFirebaseAuthHeader(req);
+    const senderUid = String(decoded?.uid || '').trim();
+    if (!senderUid) {
+      return res.status(401).json({ success: false, error: 'Invalid auth token.' });
+    }
+
+    const coupleCode = String(req.body?.coupleCode || '').trim();
+    const recipientTokens = Array.isArray(req.body?.recipientTokens)
+      ? req.body.recipientTokens.map((token) => String(token || '').trim()).filter(Boolean)
+      : [];
+    const data = req.body?.data && typeof req.body.data === 'object' ? req.body.data : {};
+    const notification = req.body?.notification && typeof req.body.notification === 'object'
+      ? req.body.notification
+      : null;
+    const ttlSecondsRaw = Number(req.body?.android?.ttlSeconds);
+    const ttlSeconds = Number.isFinite(ttlSecondsRaw)
+      ? Math.max(0, Math.min(Math.floor(ttlSecondsRaw), 86400))
+      : 0;
+
+    if (!coupleCode) {
+      return res.status(400).json({ success: false, error: 'coupleCode is required.' });
+    }
+
+    if (recipientTokens.length === 0) {
+      return res.status(400).json({ success: false, error: 'recipientTokens is required.' });
+    }
+
+    const safeData = Object.entries(data).reduce((acc, [key, value]) => {
+      if (!key) return acc;
+      acc[String(key)] = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+      return acc;
+    }, {});
+
+    const messaging = getFirebaseAdminApp().messaging();
+    const message = {
+      tokens: recipientTokens,
+      data: {
+        ...safeData,
+        coupleCode,
+      },
+      ...(notification?.title || notification?.body
+        ? {
+            notification: {
+              ...(notification?.title ? { title: String(notification.title) } : {}),
+              ...(notification?.body ? { body: String(notification.body) } : {}),
+            },
+          }
+        : {}),
+      android: {
+        priority: 'high',
+        ...(ttlSeconds > 0 ? { ttl: `${ttlSeconds}s` } : {}),
+      },
+    };
+
+    const response = await messaging.sendEachForMulticast(message);
+
+    const errors = response.responses
+      .map((entry, index) => ({
+        index,
+        token: recipientTokens[index],
+        success: entry.success,
+        error: entry.error ? String(entry.error.message || entry.error) : null,
+      }))
+      .filter((entry) => !entry.success);
+
+    console.log('push-dispatch', {
+      senderUid,
+      coupleCode,
+      requested: recipientTokens.length,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+    });
+
+    return res.json({
+      success: true,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+      errors,
+    });
+  } catch (error) {
+    console.error('Failed to dispatch push notification:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Unable to dispatch push notification right now.',
+    });
+  }
+});
 
 function requireCoupleCode(req, res, next) {
   const coupleCode = req.body?.coupleCode || req.body?.context?.coupleCode;

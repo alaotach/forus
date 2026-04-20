@@ -4,7 +4,7 @@
  * Works even when app is closed or in background
  */
 
-import { db } from './firebase';
+import { auth, db } from './firebase';
 import { doc, setDoc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { router } from 'expo-router';
 import { Alert, Linking, Platform } from 'react-native';
@@ -83,6 +83,38 @@ if (
     const payload = data?.notification?.request?.content?.data || {};
     await refreshAndroidWidgetFromPush(payload);
   });
+}
+
+async function ensureBackgroundNotificationTaskRegistration(): Promise<void> {
+  if (
+    Platform.OS !== 'android' ||
+    !Notifications ||
+    !TaskManager ||
+    backgroundTaskRegistered ||
+    typeof Notifications.registerTaskAsync !== 'function'
+  ) {
+    return;
+  }
+
+  try {
+    if (typeof Notifications.isTaskRegisteredAsync === 'function') {
+      const alreadyRegistered = await Notifications.isTaskRegisteredAsync(WIDGET_UPDATE_TASK);
+      if (alreadyRegistered) {
+        backgroundTaskRegistered = true;
+        return;
+      }
+    }
+
+    await Notifications.registerTaskAsync(WIDGET_UPDATE_TASK);
+    backgroundTaskRegistered = true;
+    console.log(`${OS_NOTIF_LOG_PREFIX} background-task-registered`, { task: WIDGET_UPDATE_TASK });
+  } catch (error) {
+    console.error(`${OS_NOTIF_LOG_PREFIX} background-task-register-failed`, error);
+  }
+}
+
+if (Platform.OS === 'android') {
+  void ensureBackgroundNotificationTaskRegistration();
 }
 
 export function setActiveNotificationRoute(pathname: string) {
@@ -362,6 +394,10 @@ export async function requestPushNotificationPermissions(): Promise<boolean> {
       return false;
     }
 
+    if (Platform.OS === 'android') {
+      void promptAndroidBackgroundReliabilitySettings();
+    }
+
     console.log(`${OS_NOTIF_LOG_PREFIX} permission granted`, {
       existingStatus,
       finalStatus,
@@ -420,6 +456,32 @@ export async function getPushToken(): Promise<string | null> {
   }
 }
 
+export async function getNativePushToken(): Promise<string | null> {
+  try {
+    if (Platform.OS !== 'android') return null;
+
+    const devicePushToken = await Notifications.getDevicePushTokenAsync();
+    const tokenData = (devicePushToken as any)?.data;
+    const tokenType = String((devicePushToken as any)?.type || '').toLowerCase();
+    const token = typeof tokenData === 'string' ? tokenData : '';
+
+    if (!token) {
+      console.warn('Native push token is empty');
+      return null;
+    }
+
+    console.log('Native push token obtained', {
+      tokenType,
+      length: token.length,
+    });
+
+    return token;
+  } catch (error) {
+    console.error('Error getting native push token:', error);
+    return null;
+  }
+}
+
 /**
  * Save device push token to Firestore
  * This allows backend to send notifications to this specific device
@@ -427,20 +489,58 @@ export async function getPushToken(): Promise<string | null> {
 export async function savePushToken(coupleCode: string, nickname: string, token: string): Promise<void> {
   try {
     const userRef = doc(db, 'couples', coupleCode);
-    
-    await setDoc(userRef, {
-      [`pushTokens.${nickname}`]: token,
-      [`pushTokenMeta.${nickname}`]: {
+    const uid = auth.currentUser?.uid;
+
+    const stableKey = uid || String(nickname || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const payload: Record<string, any> = {
+      [`pushTokensByUid.${stableKey}`]: token,
+      [`pushTokenMetaByUid.${stableKey}`]: {
         token,
         platform: Platform.OS,
+        nickname,
         updatedAt: new Date(),
       },
       updatedAt: new Date(),
-    }, { merge: true });
+    };
     
-    console.log('Push token saved to Firestore');
+    await setDoc(userRef, payload, { merge: true });
+    
+    console.log('Push token saved to Firestore', {
+      hasUid: Boolean(uid),
+      key: stableKey,
+      platform: Platform.OS,
+    });
   } catch (error) {
     console.error('Error saving push token:', error);
+  }
+}
+
+export async function saveNativePushToken(coupleCode: string, nickname: string, token: string): Promise<void> {
+  try {
+    const userRef = doc(db, 'couples', coupleCode);
+    const uid = auth.currentUser?.uid;
+    const stableKey = uid || String(nickname || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    const payload: Record<string, any> = {
+      [`nativePushTokensByUid.${stableKey}`]: token,
+      [`nativePushTokenMetaByUid.${stableKey}`]: {
+        token,
+        platform: Platform.OS,
+        nickname,
+        updatedAt: new Date(),
+      },
+      updatedAt: new Date(),
+    };
+
+    await setDoc(userRef, payload, { merge: true });
+
+    console.log('Native push token saved to Firestore', {
+      hasUid: Boolean(uid),
+      key: stableKey,
+      platform: Platform.OS,
+    });
+  } catch (error) {
+    console.error('Error saving native push token:', error);
   }
 }
 
@@ -452,6 +552,13 @@ export async function initializePushNotifications(coupleCode: string, nickname: 
   try {
     // Configure notification handler
     configureNotifications();
+
+    // Always register listeners once app starts; token registration can fail transiently.
+    setupNotificationListeners();
+
+    if (Platform.OS === 'android') {
+      void ensureBackgroundNotificationTaskRegistration();
+    }
 
     // Request permissions
     const hasPermission = await requestPushNotificationPermissions();
@@ -470,11 +577,16 @@ export async function initializePushNotifications(coupleCode: string, nickname: 
     // Save token to Firestore
     await savePushToken(coupleCode, nickname, token);
 
+    // Also save the platform-native token for direct backend FCM delivery.
+    const nativeToken = await getNativePushToken();
+    if (nativeToken) {
+      await saveNativePushToken(coupleCode, nickname, nativeToken);
+    }
+
     // Schedule/cancel same-day writing reminders based on current completion state.
     await refreshCompletionReminders(coupleCode, nickname);
 
-    // Listen for incoming notifications
-    setupNotificationListeners();
+    // Listeners are already configured above.
   } catch (error) {
     console.error('Error initializing push notifications:', error);
   }
@@ -492,20 +604,8 @@ function setupNotificationListeners(): void {
   if (listenersRegistered) return;
   listenersRegistered = true;
 
-  if (
-    Platform.OS === 'android' &&
-    TaskManager &&
-    !backgroundTaskRegistered &&
-    typeof Notifications.registerTaskAsync === 'function'
-  ) {
-    Notifications.registerTaskAsync(WIDGET_UPDATE_TASK)
-      .then(() => {
-        backgroundTaskRegistered = true;
-        console.log(`${OS_NOTIF_LOG_PREFIX} background-task-registered`, { task: WIDGET_UPDATE_TASK });
-      })
-      .catch((error: any) => {
-        console.error(`${OS_NOTIF_LOG_PREFIX} background-task-register-failed`, error);
-      });
+  if (Platform.OS === 'android') {
+    void ensureBackgroundNotificationTaskRegistration();
   }
 
   if (typeof Notifications.getLastNotificationResponseAsync === 'function') {

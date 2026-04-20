@@ -200,8 +200,8 @@ export default function ChatScreen() {
 
     // Check connection and redirect if needed
     if (!isConnected || !coupleData) {
-      console.log('Chat: Not connected, redirecting to auth');
-      router.replace('/(auth)/auth');
+      console.log('Chat: Not connected, redirecting to couple-check');
+      router.replace('/(auth)/couple-check');
       return;
     }
 
@@ -577,7 +577,7 @@ export default function ChatScreen() {
       try {
         const { notifyNewMessage } = await import('@/services/notifications');
         const preview = content.length > 50 ? content.substring(0, 50) + '...' : content;
-        notifyNewMessage(coupleData.coupleCode, coupleData.nickname, preview);
+        await notifyNewMessage(coupleData.coupleCode, coupleData.nickname, preview);
       } catch { /* non-fatal */ }
 
     } catch (error) {

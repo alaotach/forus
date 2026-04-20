@@ -47,8 +47,8 @@ export default function GoalsScreen() {
 
     // Check connection and redirect if needed
     if (!isConnected || !coupleData) {
-      console.log('Goals: Not connected, redirecting to auth');
-      router.replace('/(auth)/auth');
+      console.log('Goals: Not connected, redirecting to couple-check');
+      router.replace('/(auth)/couple-check');
       return;
     }
 

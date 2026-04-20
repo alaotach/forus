@@ -9,6 +9,7 @@
   <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
   <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"/>
   <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
@@ -27,25 +28,14 @@
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH" android:value="ALWAYS"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS" android:value="0"/>
+    <service android:name="expo.modules.notifications.service.ExpoFirebaseMessagingService" tools:node="remove"/>
     <service android:name="com.reactnativeandroidwidget.RNWidgetCollectionService" android:permission="android.permission.BIND_REMOTEVIEWS"/>
-    <receiver android:name=".widget.ForusSharedCanvas" android:exported="true" android:label="@string/widget_forussharedcanvas_5x4_label">
+    <service android:name=".notifications.ForusPushWidgetHeadlessService" android:exported="false"/>
+    <service android:name=".notifications.ForusFirebaseMessagingService" android:exported="false">
       <intent-filter>
-        <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+        <action android:name="com.google.firebase.MESSAGING_EVENT"/>
       </intent-filter>
-      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widgetprovider_forussharedcanvas"/>
-    </receiver>
-      <receiver android:name=".widget.ForusSharedCanvas4x4" android:exported="true" android:label="@string/widget_forussharedcanvas_4x4_label">
-        <intent-filter>
-          <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
-        </intent-filter>
-        <meta-data android:name="android.appwidget.provider" android:resource="@xml/widgetprovider_forussharedcanvas_4x4"/>
-      </receiver>
-      <receiver android:name=".widget.ForusSharedCanvas3x3" android:exported="true" android:label="@string/widget_forussharedcanvas_3x3_label">
-        <intent-filter>
-          <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
-        </intent-filter>
-        <meta-data android:name="android.appwidget.provider" android:resource="@xml/widgetprovider_forussharedcanvas_3x3"/>
-      </receiver>
+    </service>
     <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.App.SplashScreen" android:exported="true" android:screenOrientation="portrait">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
@@ -59,5 +49,23 @@
         <data android:scheme="exp+couples-connection"/>
       </intent-filter>
     </activity>
+    <receiver android:name=".widget.ForusSharedCanvas" android:exported="true" android:label="@string/widget_forussharedcanvas_5x4_label">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+      </intent-filter>
+      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widgetprovider_forussharedcanvas"/>
+    </receiver>
+    <receiver android:name=".widget.ForusSharedCanvas4x4" android:exported="true" android:label="@string/widget_forussharedcanvas_4x4_label">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+      </intent-filter>
+      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widgetprovider_forussharedcanvas_4x4"/>
+    </receiver>
+    <receiver android:name=".widget.ForusSharedCanvas3x3" android:exported="true" android:label="@string/widget_forussharedcanvas_3x3_label">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+      </intent-filter>
+      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widgetprovider_forussharedcanvas_3x3"/>
+    </receiver>
   </application>
 </manifest>

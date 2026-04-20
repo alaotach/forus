@@ -1,6 +1,7 @@
 import { db } from './firebase';
 import { doc, setDoc, collection, query, where, onSnapshot, serverTimestamp, updateDoc, getDocs, getDoc } from 'firebase/firestore';
 import { Platform } from 'react-native';
+import { auth } from './firebase';
 
 const PUSH_SEND_LOG_PREFIX = '[push-send]';
 const OS_FALLBACK_LOG_PREFIX = '[os-fallback]';
@@ -108,6 +109,7 @@ async function dispatchExpoPushNotifications(
     type: NotificationEvent['type'];
     from?: string;
     silent?: boolean;
+    ttlSeconds?: number;
   }
 ) {
   try {
@@ -120,26 +122,115 @@ async function dispatchExpoPushNotifications(
 
     const coupleData = coupleSnap.data() as any;
     const pushTokens = (coupleData?.pushTokens || {}) as Record<string, string>;
+    const pushTokensByUid = (coupleData?.pushTokensByUid || {}) as Record<string, string>;
+    const nativePushTokensByUid = (coupleData?.nativePushTokensByUid || {}) as Record<string, string>;
 
-    const recipientTokens = Object.entries(pushTokens)
+    const nicknameScopedTokens = Object.entries(pushTokens)
+      .filter(([, token]) => typeof token === 'string' && token.trim().length > 0)
+      .map(([, token]) => token.trim());
+
+    const uidScopedTokens = Object.values(pushTokensByUid)
+      .filter((token) => typeof token === 'string' && token.trim().length > 0)
+      .map((token) => token.trim());
+
+    const allTokens = [...nicknameScopedTokens, ...uidScopedTokens]
+      .filter((token, index, arr) => arr.indexOf(token) === index);
+
+    const nativeTokens = Object.values(nativePushTokensByUid)
+      .filter((token) => typeof token === 'string' && token.trim().length > 0)
+      .map((token) => token.trim())
+      .filter((token, index, arr) => arr.indexOf(token) === index);
+
+    let recipientTokens = Object.entries(pushTokens)
       .filter(([nickname, token]) => nickname !== payload.from && typeof token === 'string' && token.trim().length > 0)
       .map(([, token]) => token.trim())
       .filter((token, index, arr) => arr.indexOf(token) === index);
+
+    // If sender-key filtering removed every target (nickname mismatch/collision),
+    // fallback to all unique tokens so partner pushes are not silently dropped.
+    if (recipientTokens.length === 0 && allTokens.length > 0) {
+      recipientTokens = allTokens;
+      console.log(`${PUSH_SEND_LOG_PREFIX} fallback-all-tokens`, {
+        coupleCode,
+        type: payload.type,
+        from: payload.from || 'System',
+      });
+    }
 
     console.log(`${PUSH_SEND_LOG_PREFIX} recipients-resolved`, {
       coupleCode,
       type: payload.type,
       from: payload.from || 'System',
       pushTokenOwners: Object.keys(pushTokens),
+      pushTokenUidOwners: Object.keys(pushTokensByUid),
+      nativePushTokenUidOwners: Object.keys(nativePushTokensByUid),
+      pushTokenLegacyCount: nicknameScopedTokens.length,
+      pushTokenUidCount: uidScopedTokens.length,
+      nativePushTokenCount: nativeTokens.length,
+      pushTokenUniqueCount: allTokens.length,
       recipientCount: recipientTokens.length,
     });
 
-    if (recipientTokens.length === 0) {
+    if (recipientTokens.length === 0 && nativeTokens.length === 0) {
       console.log(`${PUSH_SEND_LOG_PREFIX} no-recipient-token`, {
         coupleCode,
         type: payload.type,
         from: payload.from || 'System',
       });
+      return;
+    }
+
+    const backendBaseUrl = String(process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/$/, '');
+    if (backendBaseUrl && nativeTokens.length > 0) {
+      try {
+        const idToken = await auth.currentUser?.getIdToken();
+        if (idToken) {
+          const backendResponse = await fetch(`${backendBaseUrl}/api/push/dispatch`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              coupleCode,
+              recipientTokens: nativeTokens,
+              data: {
+                type: payload.type,
+                coupleCode,
+                from: payload.from || 'System',
+              },
+              notification: payload.silent ? null : {
+                title: payload.title || 'Forus',
+                body: payload.body || 'You have a new update',
+              },
+              android: {
+                priority: 'high',
+                ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
+              },
+            }),
+          });
+
+          const backendBody = await backendResponse.json().catch(() => ({}));
+          console.log(`${PUSH_SEND_LOG_PREFIX} backend-fcm-response`, {
+            coupleCode,
+            type: payload.type,
+            ok: backendResponse.ok,
+            status: backendResponse.status,
+            successCount: backendBody?.successCount,
+            failureCount: backendBody?.failureCount,
+          });
+        } else {
+          console.warn(`${PUSH_SEND_LOG_PREFIX} backend-fcm-skipped-no-id-token`, {
+            coupleCode,
+            type: payload.type,
+          });
+        }
+      } catch (backendError) {
+        console.error(`${PUSH_SEND_LOG_PREFIX} backend-fcm-dispatch-failed`, backendError);
+      }
+    }
+
+    if (recipientTokens.length === 0) {
       return;
     }
 
@@ -153,6 +244,10 @@ async function dispatchExpoPushNotifications(
           from: payload.from || 'System',
         },
       };
+
+      if (typeof payload.ttlSeconds === 'number' && Number.isFinite(payload.ttlSeconds)) {
+        baseMessage.ttl = Math.max(0, Math.floor(payload.ttlSeconds));
+      }
 
       if (payload.silent) {
         baseMessage.contentAvailable = true;
@@ -362,6 +457,7 @@ export async function sendWidgetUpdatePush(coupleCode: string, from?: string) {
       type: 'widget-update',
       from,
       silent: true,
+      ttlSeconds: 120,
     });
   } catch (error) {
     console.error('Error sending widget-update push:', error);

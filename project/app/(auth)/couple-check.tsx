@@ -9,7 +9,7 @@ import {
   Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { getCurrentUser, getUserProfile, isCoupleConnected } from '@/services/auth';
+import { getCurrentUser, getUserProfile, isCoupleConnected, refreshCurrentUser } from '@/services/auth';
 import { useCouple } from '@/hooks/useCouple';
 
 export default function CoupleCheckScreen() {
@@ -30,7 +30,8 @@ export default function CoupleCheckScreen() {
       return;
     }
 
-    if (!user.emailVerified) {
+    const refreshedUser = await refreshCurrentUser();
+    if (!refreshedUser?.emailVerified) {
       // @ts-ignore
       router.replace('/(auth)/verify-email');
       return;

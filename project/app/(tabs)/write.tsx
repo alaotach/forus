@@ -36,7 +36,7 @@ export default function WriteScreen() {
     }
 
     if (!isConnected) {
-      router.replace('/(auth)/auth');
+      router.replace('/(auth)/couple-check');
       return;
     }
 

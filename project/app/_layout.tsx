@@ -48,15 +48,17 @@ export default function RootLayout() {
       setUser(authUser);
 
       if (authUser) {
+        let isVerified = Boolean(authUser.emailVerified);
         try {
           const reloadedUser = await refreshCurrentUser();
-          setEmailVerified(Boolean(reloadedUser?.emailVerified));
+          isVerified = Boolean(reloadedUser?.emailVerified);
         } catch (error) {
           console.error('Error refreshing user verification state:', error);
-          setEmailVerified(Boolean(authUser.emailVerified));
         }
 
-        if (!authUser.emailVerified) {
+        setEmailVerified(isVerified);
+
+        if (!isVerified) {
           setCoupleConnected(false);
           setAuthLoading(false);
           return;

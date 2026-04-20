@@ -162,8 +162,8 @@ export default function VaultScreen() {
 
     // Check connection and redirect if needed
     if (!isConnected || !coupleData) {
-      console.log('Vault: Not connected, redirecting to auth');
-      router.replace('/(auth)/auth');
+      console.log('Vault: Not connected, redirecting to couple-check');
+      router.replace('/(auth)/couple-check');
       return;
     }
 
