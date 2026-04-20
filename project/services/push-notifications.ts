@@ -348,22 +348,19 @@ export function configureNotifications() {
       const data = notification?.request?.content?.data || {};
       const notificationType = String(data?.type || '');
       const notificationTitle = String(notification?.request?.content?.title || '');
-      const isChatRouteActive = activeRoutePath.includes('/chat');
-      const suppressChatMessageBanner = isChatRouteActive && notificationType === 'message';
 
       console.log(`${OS_NOTIF_LOG_PREFIX} handleNotification`, {
         title: notificationTitle,
         type: notificationType,
         route: activeRoutePath,
-        suppressChatMessageBanner,
       });
 
       return {
         // Keep both legacy and new fields for Expo SDK compatibility across builds.
-        shouldShowAlert: !suppressChatMessageBanner,
-        shouldShowBanner: !suppressChatMessageBanner,
-        shouldShowList: !suppressChatMessageBanner,
-        shouldPlaySound: !suppressChatMessageBanner,
+        shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
         shouldSetBadge: true,
       };
     },

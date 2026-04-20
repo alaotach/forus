@@ -8,6 +8,33 @@ const OS_FALLBACK_LOG_PREFIX = '[os-fallback]';
 const localFallbackSeenIds = new Set<string>();
 let Notifications: any;
 
+function readTokenMap(root: Record<string, any>, nestedKey: string, dottedPrefix: string): Record<string, string> {
+  const nestedRaw = root?.[nestedKey];
+  const nested = nestedRaw && typeof nestedRaw === 'object' && !Array.isArray(nestedRaw)
+    ? Object.entries(nestedRaw)
+        .map(([key, value]) => [String(key), String(value || '').trim()] as const)
+        .filter(([, value]) => Boolean(value))
+        .reduce((acc, [key, value]) => {
+          acc[key] = value;
+          return acc;
+        }, {} as Record<string, string>)
+    : {};
+
+  const dotted = Object.entries(root || {})
+    .filter(([key]) => String(key).startsWith(dottedPrefix))
+    .map(([key, value]) => [String(key).slice(dottedPrefix.length), String(value || '').trim()] as const)
+    .filter(([suffix, value]) => Boolean(suffix) && Boolean(value))
+    .reduce((acc, [suffix, value]) => {
+      acc[suffix] = value;
+      return acc;
+    }, {} as Record<string, string>);
+
+  return {
+    ...dotted,
+    ...nested,
+  };
+}
+
 function resolveBackendBaseUrl(): string {
   const fromEnv = String(process.env.EXPO_PUBLIC_BACKEND_URL || '').trim().replace(/\/$/, '');
   if (fromEnv) return fromEnv;
@@ -135,9 +162,9 @@ async function dispatchExpoPushNotifications(
     }
 
     const coupleData = coupleSnap.data() as any;
-    const pushTokens = (coupleData?.pushTokens || {}) as Record<string, string>;
-    const pushTokensByUid = (coupleData?.pushTokensByUid || {}) as Record<string, string>;
-    const nativePushTokensByUid = (coupleData?.nativePushTokensByUid || {}) as Record<string, string>;
+    const pushTokens = readTokenMap(coupleData || {}, 'pushTokens', 'pushTokens.');
+    const pushTokensByUid = readTokenMap(coupleData || {}, 'pushTokensByUid', 'pushTokensByUid.');
+    const nativePushTokensByUid = readTokenMap(coupleData || {}, 'nativePushTokensByUid', 'nativePushTokensByUid.');
 
     const nicknameScopedTokens = Object.entries(pushTokens)
       .filter(([, token]) => typeof token === 'string' && token.trim().length > 0)
@@ -159,6 +186,11 @@ async function dispatchExpoPushNotifications(
       .filter(([nickname, token]) => nickname !== payload.from && typeof token === 'string' && token.trim().length > 0)
       .map(([, token]) => token.trim())
       .filter((token, index, arr) => arr.indexOf(token) === index);
+
+    // Widget refresh pushes should reach every known device in the couple, including sender-owned devices.
+    if (payload.type === 'widget-update') {
+      recipientTokens = allTokens;
+    }
 
     // If sender-key filtering removed every target (nickname mismatch/collision),
     // fallback to all unique tokens so partner pushes are not silently dropped.
@@ -191,7 +223,6 @@ async function dispatchExpoPushNotifications(
         type: payload.type,
         from: payload.from || 'System',
       });
-      return;
     }
 
     const backendBaseUrl = resolveBackendBaseUrl();

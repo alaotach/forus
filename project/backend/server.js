@@ -700,6 +700,17 @@ app.post('/api/push/dispatch', async (req, res) => {
         : {}),
       android: {
         priority: 'high',
+        ...(notification?.title || notification?.body
+          ? {
+              notification: {
+                channelId: 'default',
+                sound: 'default',
+                priority: 'max',
+                visibility: 'public',
+                defaultVibrateTimings: true,
+              },
+            }
+          : {}),
         ...(ttlSeconds > 0 ? { ttl: ttlSeconds * 1000 } : {}),
       },
     };
