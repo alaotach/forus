@@ -571,15 +571,38 @@ app.post('/api/push/dispatch', async (req, res) => {
       const coupleDoc = await getFirebaseAdminApp().firestore().collection('couples').doc(coupleCode).get();
       const coupleData = coupleDoc.exists ? (coupleDoc.data() || {}) : {};
       const nativePushTokensByUid = coupleData.nativePushTokensByUid || {};
+      const pushTokensByUid = coupleData.pushTokensByUid || {};
+      const pushTokensByNickname = coupleData.pushTokens || {};
+      const usersByNickname = coupleData.users || {};
 
-      recipientTokens = Object.values(nativePushTokensByUid)
-        .map((token) => String(token || '').trim())
-        .filter(Boolean)
-        .filter((token, index, arr) => arr.indexOf(token) === index);
+      const senderNicknameFromData = String(data?.from || '').trim();
+      let senderNickname = senderNicknameFromData;
+      if (!senderNickname) {
+        senderNickname = Object.entries(usersByNickname).find(([, user]) => {
+          return String(user?.uid || '').trim() === senderUid;
+        })?.[0] || '';
+      }
+
+      const nativeTokens = Object.entries(nativePushTokensByUid)
+        .filter(([uid]) => String(uid) !== senderUid)
+        .map(([, token]) => String(token || '').trim())
+        .filter(Boolean);
+
+      const uidTokens = Object.entries(pushTokensByUid)
+        .filter(([uid]) => String(uid) !== senderUid)
+        .map(([, token]) => String(token || '').trim())
+        .filter(Boolean);
+
+      const nicknameTokens = Object.entries(pushTokensByNickname)
+        .filter(([nickname]) => !senderNickname || String(nickname) !== senderNickname)
+        .map(([, token]) => String(token || '').trim())
+        .filter(Boolean);
+
+      recipientTokens = Array.from(new Set([...nativeTokens, ...uidTokens, ...nicknameTokens]));
     }
 
     if (recipientTokens.length === 0) {
-      return res.status(400).json({ success: false, error: 'No recipient native push tokens available.' });
+      return res.status(400).json({ success: false, error: 'No recipient push tokens available.' });
     }
 
     const safeData = Object.entries(data).reduce((acc, [key, value]) => {

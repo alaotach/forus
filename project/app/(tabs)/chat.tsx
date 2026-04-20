@@ -120,10 +120,13 @@ function resolveBackendBaseUrlForChat(): string {
   if (fromEnv) return fromEnv;
 
   if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location?.origin) {
-    return String(window.location.origin).replace(/\/$/, '');
+    const origin = String(window.location.origin).replace(/\/$/, '');
+    if (!/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
+      return origin;
+    }
   }
 
-  return '';
+  return 'https://forus.eryzalabs.com';
 }
 
 export default function ChatScreen() {
@@ -599,17 +602,29 @@ export default function ChatScreen() {
             headers.Authorization = `Bearer ${idToken}`;
           }
 
-          // Gather partner's native and Expo tokens to satisfy the remote backend requirement
-          const nativeTokens = Object.entries(coupleData.nativePushTokensByUid || {})
-            .filter(([uid, t]) => uid !== auth.currentUser?.uid && typeof t === 'string' && t.trim().length > 0)
-            .map(([, t]) => String(t));
-          const legacyTokens = Object.entries(coupleData.pushTokens || {})
-            .filter(([nick, t]) => nick !== coupleData.nickname && typeof t === 'string' && t.trim().length > 0)
-            .map(([, t]) => String(t));
-          const uidTokens = Object.entries(coupleData.pushTokensByUid || {})
-            .filter(([uid, t]) => uid !== auth.currentUser?.uid && typeof t === 'string' && t.trim().length > 0)
-            .map(([, t]) => String(t));
-          const recipientTokens = Array.from(new Set([...nativeTokens, ...legacyTokens, ...uidTokens]));
+          // Fetch the actual current tokens from Firestore
+          const { getDoc, doc: _doc } = await import('firebase/firestore');
+          const coupleSnap = await getDoc(_doc(db, 'couples', coupleData.coupleCode));
+          const coupleFS = coupleSnap.data() || {};
+
+          const nativeTokens = Object.entries(coupleFS.nativePushTokensByUid || {})
+            .filter(([uid]) => uid !== auth.currentUser?.uid)
+            .map(([, t]) => String(t))
+            .filter(t => t.trim().length > 0);
+          const legacyTokens = Object.entries(coupleFS.pushTokens || {})
+            .filter(([nick]) => nick !== coupleData.nickname)
+            .map(([, t]) => String(t))
+            .filter(t => t.trim().length > 0);
+          const uidTokens = Object.entries(coupleFS.pushTokensByUid || {})
+            .filter(([uid]) => uid !== auth.currentUser?.uid)
+            .map(([, t]) => String(t))
+            .filter(t => t.trim().length > 0);
+            
+          let recipientTokens = Array.from(new Set([...nativeTokens, ...legacyTokens, ...uidTokens]));
+
+          if (recipientTokens.length === 0) {
+            console.log('[chat-push] No partner tokens found in Firestore. Sending request with empty tokens so backend can resolve.');
+          }
 
           const response = await fetch(`${backendBaseUrl}/api/push/dispatch`, {
             method: 'POST',

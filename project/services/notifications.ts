@@ -13,10 +13,13 @@ function resolveBackendBaseUrl(): string {
   if (fromEnv) return fromEnv;
 
   if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location?.origin) {
-    return String(window.location.origin).replace(/\/$/, '');
+    const origin = String(window.location.origin).replace(/\/$/, '');
+    if (!/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
+      return origin;
+    }
   }
 
-  return '';
+  return 'https://forus.eryzalabs.com';
 }
 
 try {
