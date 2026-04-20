@@ -8,6 +8,17 @@ const OS_FALLBACK_LOG_PREFIX = '[os-fallback]';
 const localFallbackSeenIds = new Set<string>();
 let Notifications: any;
 
+function resolveBackendBaseUrl(): string {
+  const fromEnv = String(process.env.EXPO_PUBLIC_BACKEND_URL || '').trim().replace(/\/$/, '');
+  if (fromEnv) return fromEnv;
+
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location?.origin) {
+    return String(window.location.origin).replace(/\/$/, '');
+  }
+
+  return '';
+}
+
 try {
   Notifications = require('expo-notifications');
 } catch {
@@ -180,54 +191,59 @@ async function dispatchExpoPushNotifications(
       return;
     }
 
-    const backendBaseUrl = String(process.env.EXPO_PUBLIC_BACKEND_URL || '').replace(/\/$/, '');
-    if (backendBaseUrl && nativeTokens.length > 0) {
+    const backendBaseUrl = resolveBackendBaseUrl();
+    if (backendBaseUrl) {
       try {
         const idToken = await auth.currentUser?.getIdToken();
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
         if (idToken) {
-          const backendResponse = await fetch(`${backendBaseUrl}/api/push/dispatch`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${idToken}`,
-            },
-            body: JSON.stringify({
-              coupleCode,
-              recipientTokens: nativeTokens,
-              data: {
-                type: payload.type,
-                coupleCode,
-                from: payload.from || 'System',
-              },
-              notification: payload.silent ? null : {
-                title: payload.title || 'Forus',
-                body: payload.body || 'You have a new update',
-              },
-              android: {
-                priority: 'high',
-                ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
-              },
-            }),
-          });
-
-          const backendBody = await backendResponse.json().catch(() => ({}));
-          console.log(`${PUSH_SEND_LOG_PREFIX} backend-fcm-response`, {
-            coupleCode,
-            type: payload.type,
-            ok: backendResponse.ok,
-            status: backendResponse.status,
-            successCount: backendBody?.successCount,
-            failureCount: backendBody?.failureCount,
-          });
-        } else {
-          console.warn(`${PUSH_SEND_LOG_PREFIX} backend-fcm-skipped-no-id-token`, {
-            coupleCode,
-            type: payload.type,
-          });
+          headers.Authorization = `Bearer ${idToken}`;
         }
+
+        const backendResponse = await fetch(`${backendBaseUrl}/api/push/dispatch`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            coupleCode,
+            recipientTokens: nativeTokens,
+            data: {
+              type: payload.type,
+              coupleCode,
+              from: payload.from || 'System',
+            },
+            notification: payload.silent ? null : {
+              title: payload.title || 'Forus',
+              body: payload.body || 'You have a new update',
+            },
+            android: {
+              priority: 'high',
+              ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
+            },
+          }),
+        });
+
+        const backendBody = await backendResponse.json().catch(() => ({}));
+        console.log(`${PUSH_SEND_LOG_PREFIX} backend-fcm-response`, {
+          coupleCode,
+          type: payload.type,
+          ok: backendResponse.ok,
+          status: backendResponse.status,
+          successCount: backendBody?.successCount,
+          failureCount: backendBody?.failureCount,
+          hasIdToken: Boolean(idToken),
+        });
       } catch (backendError) {
         console.error(`${PUSH_SEND_LOG_PREFIX} backend-fcm-dispatch-failed`, backendError);
       }
+    } else {
+      console.log(`${PUSH_SEND_LOG_PREFIX} backend-fcm-skipped`, {
+        reason: 'missing-backend-url',
+        coupleCode,
+        type: payload.type,
+        nativeTokenCount: nativeTokens.length,
+      });
     }
 
     if (recipientTokens.length === 0) {

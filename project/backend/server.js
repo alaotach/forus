@@ -186,12 +186,16 @@ async function verifyFirebasePassword(email, password) {
 async function verifyFirebaseAuthHeader(req) {
   const authHeader = String(req.headers.authorization || '');
   if (!authHeader.startsWith('Bearer ')) {
-    throw new Error('Missing bearer token.');
+    const error = new Error('Missing bearer token.');
+    error.statusCode = 401;
+    throw error;
   }
 
   const idToken = authHeader.slice('Bearer '.length).trim();
   if (!idToken) {
-    throw new Error('Missing bearer token.');
+    const error = new Error('Missing bearer token.');
+    error.statusCode = 401;
+    throw error;
   }
 
   const decoded = await getFirebaseAdminApp().auth().verifyIdToken(idToken);
@@ -547,7 +551,7 @@ app.post('/api/push/dispatch', async (req, res) => {
     }
 
     const coupleCode = String(req.body?.coupleCode || '').trim();
-    const recipientTokens = Array.isArray(req.body?.recipientTokens)
+    let recipientTokens = Array.isArray(req.body?.recipientTokens)
       ? req.body.recipientTokens.map((token) => String(token || '').trim()).filter(Boolean)
       : [];
     const data = req.body?.data && typeof req.body.data === 'object' ? req.body.data : {};
@@ -564,7 +568,18 @@ app.post('/api/push/dispatch', async (req, res) => {
     }
 
     if (recipientTokens.length === 0) {
-      return res.status(400).json({ success: false, error: 'recipientTokens is required.' });
+      const coupleDoc = await getFirebaseAdminApp().firestore().collection('couples').doc(coupleCode).get();
+      const coupleData = coupleDoc.exists ? (coupleDoc.data() || {}) : {};
+      const nativePushTokensByUid = coupleData.nativePushTokensByUid || {};
+
+      recipientTokens = Object.values(nativePushTokensByUid)
+        .map((token) => String(token || '').trim())
+        .filter(Boolean)
+        .filter((token, index, arr) => arr.indexOf(token) === index);
+    }
+
+    if (recipientTokens.length === 0) {
+      return res.status(400).json({ success: false, error: 'No recipient native push tokens available.' });
     }
 
     const safeData = Object.entries(data).reduce((acc, [key, value]) => {
@@ -621,9 +636,12 @@ app.post('/api/push/dispatch', async (req, res) => {
     });
   } catch (error) {
     console.error('Failed to dispatch push notification:', error);
-    return res.status(500).json({
+    const statusCode = Number(error?.statusCode || 500);
+    return res.status(statusCode).json({
       success: false,
-      error: 'Unable to dispatch push notification right now.',
+      error: statusCode === 401
+        ? 'Unauthorized push dispatch request.'
+        : 'Unable to dispatch push notification right now.',
     });
   }
 });

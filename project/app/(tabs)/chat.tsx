@@ -35,7 +35,7 @@ import {
   arrayUnion,
   arrayRemove,
 } from 'firebase/firestore';
-import { db } from '@/services/firebase';
+import { auth, db } from '@/services/firebase';
 import { ChatMessage } from '@/types/app';
 import { uploadPhotoMedia, uploadAudioMedia } from '@/services/mediaUpload';
 import { streamAndCacheMedia, getCachedFile } from '@/services/media';
@@ -113,6 +113,17 @@ function deserializeMessagesFromOffline(raw: any[]): ChatMessage[] {
 
     return restored as ChatMessage;
   });
+}
+
+function resolveBackendBaseUrlForChat(): string {
+  const fromEnv = String(process.env.EXPO_PUBLIC_BACKEND_URL || '').trim().replace(/\/$/, '');
+  if (fromEnv) return fromEnv;
+
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.location?.origin) {
+    return String(window.location.origin).replace(/\/$/, '');
+  }
+
+  return '';
 }
 
 export default function ChatScreen() {
@@ -575,10 +586,72 @@ export default function ChatScreen() {
 
       // Fire notification silently
       try {
+        const preview = content.length > 50 ? content.substring(0, 50) + '...' : content;
+        const backendBaseUrl = resolveBackendBaseUrlForChat();
+        console.log('[chat-push] attempting direct dispatch to:', backendBaseUrl);
+
+        if (backendBaseUrl) {
+          const idToken = await auth.currentUser?.getIdToken();
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+          };
+          if (idToken) {
+            headers.Authorization = `Bearer ${idToken}`;
+          }
+
+          // Gather partner's native and Expo tokens to satisfy the remote backend requirement
+          const nativeTokens = Object.entries(coupleData.nativePushTokensByUid || {})
+            .filter(([uid, t]) => uid !== auth.currentUser?.uid && typeof t === 'string' && t.trim().length > 0)
+            .map(([, t]) => String(t));
+          const legacyTokens = Object.entries(coupleData.pushTokens || {})
+            .filter(([nick, t]) => nick !== coupleData.nickname && typeof t === 'string' && t.trim().length > 0)
+            .map(([, t]) => String(t));
+          const uidTokens = Object.entries(coupleData.pushTokensByUid || {})
+            .filter(([uid, t]) => uid !== auth.currentUser?.uid && typeof t === 'string' && t.trim().length > 0)
+            .map(([, t]) => String(t));
+          const recipientTokens = Array.from(new Set([...nativeTokens, ...legacyTokens, ...uidTokens]));
+
+          const response = await fetch(`${backendBaseUrl}/api/push/dispatch`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              coupleCode: coupleData.coupleCode,
+              recipientTokens,
+              data: {
+                type: 'message',
+                coupleCode: coupleData.coupleCode,
+                from: coupleData.nickname,
+              },
+              notification: {
+                title: '💬 New message',
+                body: `${coupleData.nickname}: ${preview}`,
+              },
+              android: {
+                priority: 'high',
+                ttlSeconds: 300,
+              },
+            }),
+          });
+          
+          const responseBody = await response.json().catch(() => ({}));
+          console.log('[chat-push] direct dispatch response', {
+            ok: response.ok,
+            status: response.status,
+            body: responseBody,
+          });
+        }
+      } catch (directPushError) {
+        console.error('[chat-push] direct dispatch failed with error:', directPushError);
+      }
+
+      // Also trigger the existing module
+      try {
         const { notifyNewMessage } = await import('@/services/notifications');
         const preview = content.length > 50 ? content.substring(0, 50) + '...' : content;
         await notifyNewMessage(coupleData.coupleCode, coupleData.nickname, preview);
-      } catch { /* non-fatal */ }
+      } catch (notifyError) {
+        console.error('[chat-push] notifyNewMessage module failed:', notifyError);
+      }
 
     } catch (error) {
       console.error('Error sending message:', error);

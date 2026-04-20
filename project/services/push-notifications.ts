@@ -567,20 +567,24 @@ export async function initializePushNotifications(coupleCode: string, nickname: 
       return;
     }
 
-    // Get push token
+    // Register Expo token (legacy/expo-gateway path).
     const token = await getPushToken();
-    if (!token) {
-      console.log('Failed to get push token');
-      return;
+    if (token) {
+      await savePushToken(coupleCode, nickname, token);
+    } else {
+      console.log('Failed to get Expo push token');
     }
 
-    // Save token to Firestore
-    await savePushToken(coupleCode, nickname, token);
-
-    // Also save the platform-native token for direct backend FCM delivery.
+    // Register native token independently (direct backend FCM path).
     const nativeToken = await getNativePushToken();
     if (nativeToken) {
       await saveNativePushToken(coupleCode, nickname, nativeToken);
+    } else {
+      console.log('Failed to get native push token');
+    }
+
+    if (!token && !nativeToken) {
+      console.log('Push token registration failed for both Expo and native FCM');
     }
 
     // Schedule/cancel same-day writing reminders based on current completion state.
