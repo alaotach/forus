@@ -573,9 +573,37 @@ app.post('/api/push/dispatch', async (req, res) => {
     if (recipientTokens.length === 0) {
       const coupleDoc = await getFirebaseAdminApp().firestore().collection('couples').doc(coupleCode).get();
       const coupleData = coupleDoc.exists ? (coupleDoc.data() || {}) : {};
-      const nativePushTokensByUid = coupleData.nativePushTokensByUid || {};
-      const pushTokensByUid = coupleData.pushTokensByUid || {};
-      const pushTokensByNickname = coupleData.pushTokens || {};
+
+      const readTokenMap = (root, nestedKey, dottedPrefix) => {
+        const nestedRaw = root?.[nestedKey];
+        const nested = nestedRaw && typeof nestedRaw === 'object' && !Array.isArray(nestedRaw)
+          ? Object.entries(nestedRaw)
+              .map(([key, value]) => [String(key), String(value || '').trim()])
+              .filter(([, value]) => Boolean(value))
+              .reduce((acc, [key, value]) => {
+                acc[key] = value;
+                return acc;
+              }, {})
+          : {};
+
+        const dotted = Object.entries(root || {})
+          .filter(([key]) => String(key).startsWith(dottedPrefix))
+          .map(([key, value]) => [String(key).slice(dottedPrefix.length), String(value || '').trim()])
+          .filter(([suffix, value]) => Boolean(suffix) && Boolean(value))
+          .reduce((acc, [suffix, value]) => {
+            acc[suffix] = value;
+            return acc;
+          }, {});
+
+        return {
+          ...dotted,
+          ...nested,
+        };
+      };
+
+      const nativePushTokensByUid = readTokenMap(coupleData, 'nativePushTokensByUid', 'nativePushTokensByUid.');
+      const pushTokensByUid = readTokenMap(coupleData, 'pushTokensByUid', 'pushTokensByUid.');
+      const pushTokensByNickname = readTokenMap(coupleData, 'pushTokens', 'pushTokens.');
       const usersByNickname = coupleData.users || {};
 
       const senderNicknameFromData = String(data?.from || '').trim();
