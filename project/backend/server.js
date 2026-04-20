@@ -656,9 +656,17 @@ app.post('/api/push/dispatch', async (req, res) => {
       });
     }
 
+    const reservedDataKeys = new Set(['from', 'message_type', 'collapse_key', 'google', 'gcm']);
     const safeData = Object.entries(data).reduce((acc, [key, value]) => {
       if (!key) return acc;
-      acc[String(key)] = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+
+      const rawKey = String(key).trim();
+      if (!rawKey) return acc;
+
+      // FCM rejects reserved keys such as `from`.
+      const mappedKey = reservedDataKeys.has(rawKey) ? `x_${rawKey}` : rawKey;
+
+      acc[mappedKey] = typeof value === 'string' ? value : JSON.stringify(value ?? '');
       return acc;
     }, {});
 
