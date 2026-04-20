@@ -567,6 +567,8 @@ app.post('/api/push/dispatch', async (req, res) => {
       return res.status(400).json({ success: false, error: 'coupleCode is required.' });
     }
 
+    let tokenDiagnostics = null;
+
     if (recipientTokens.length === 0) {
       const coupleDoc = await getFirebaseAdminApp().firestore().collection('couples').doc(coupleCode).get();
       const coupleData = coupleDoc.exists ? (coupleDoc.data() || {}) : {};
@@ -599,10 +601,22 @@ app.post('/api/push/dispatch', async (req, res) => {
         .filter(Boolean);
 
       recipientTokens = Array.from(new Set([...nativeTokens, ...uidTokens, ...nicknameTokens]));
+
+      tokenDiagnostics = {
+        senderUid,
+        senderNickname: senderNickname || null,
+        nativeTokenOwnerCount: Object.keys(nativePushTokensByUid).length,
+        uidTokenOwnerCount: Object.keys(pushTokensByUid).length,
+        nicknameTokenOwnerCount: Object.keys(pushTokensByNickname).length,
+      };
     }
 
     if (recipientTokens.length === 0) {
-      return res.status(400).json({ success: false, error: 'No recipient push tokens available.' });
+      return res.status(400).json({
+        success: false,
+        error: 'No recipient push tokens available. Partner may be web-only (no native/device token registered).',
+        diagnostics: tokenDiagnostics,
+      });
     }
 
     const safeData = Object.entries(data).reduce((acc, [key, value]) => {
